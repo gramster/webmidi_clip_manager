@@ -842,6 +842,11 @@ function drawRollSVG(renderNotes, loopLenSec, barSec, chordSegs){
   const W = bars*pxPerBar + gutterW + 20;
   const H = prange*rowH + 24 + chordH;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('data-gutter', String(gutterW));
+  svg.setAttribute('data-pxPerBar', String(pxPerBar));
+  svg.setAttribute('data-barSec', String(barSec));
+  svg.setAttribute('data-chordH', String(chordH));
+  svg.setAttribute('data-loop', String(loopLenSec));
 
   // Background + gutter
   const bg = document.createElementNS('http://www.w3.org/2000/svg','rect');
@@ -978,11 +983,14 @@ async function playLoop(relpath, rowId){
     if(!playing || !phEl) return;
     const elapsed = (performance.now() - playing.startMs) / 1000;
     const t = elapsed % finalLoop;
-    const pxPerBar = 220;
-    const x = 60 + (t / barSec) * pxPerBar;
+    const gutterW = parseFloat(svg.getAttribute('data-gutter')) || 60;
+    const pxPerBar = parseFloat(svg.getAttribute('data-pxPerBar')) || 220;
+    const barSecPH = parseFloat(svg.getAttribute('data-barSec')) || barSec;
+    const chordH = parseFloat(svg.getAttribute('data-chordH')) || 0;
+    const x = gutterW + (t / barSecPH) * pxPerBar;
     const vb = svg.getAttribute('viewBox').split(' ').map(Number);
     const H = vb[3];
-    phEl.setAttribute('x1', x+0.5); phEl.setAttribute('x2', x+0.5); phEl.setAttribute('y1', 18); phEl.setAttribute('y2', H);
+    phEl.setAttribute('x1', x+0.5); phEl.setAttribute('x2', x+0.5); phEl.setAttribute('y1', chordH); phEl.setAttribute('y2', H);
   };
   const phIv = setInterval(updatePH, 33);
 
