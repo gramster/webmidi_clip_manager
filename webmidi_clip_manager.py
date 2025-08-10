@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 # webmidi_clip_manager.py
 #
-# Local web app to preview & manage MIDI phrases for hardware synths (incl. Yamaha Montage/MODX arps).
+# WebMIDI Clip Manager – preview, analyze, and export MIDI phrases (Yamaha-friendly).
 #
-# New in this build:
-# - "Stop All" button
-# - Velocity scaling baked into EXPORT (optional; preview scaling still separate)
-# - ZIP export of processed selections
-# - Piano roll live indicators: moving playhead + active note highlighting
+# Additions in this build:
+# - Chord inference on preview, with labels drawn at the top of the piano roll
+# - Checkbox to include the inferred chord progression in export filenames
+# - Single velocity control (preview/export), Normalize-to-C + Round-to-P2 default ON
+# - Compact MIDI channel dropdown; adaptive piano-roll scaling + note-name gutter
 #
 import argparse
 import re
 import json
-import shutil
 import io
 import zipfile
 from pathlib import Path
@@ -254,14 +253,11 @@ def write_transposed_truncated_forcedppq(src: Path, dst: Path, semitones: Option
     max_vel = 0
     if vel_target is not None:
         for tr in mid.tracks:
-            t = 0
             for msg in tr:
-                t += msg.time
                 if msg.type == 'note_on' and msg.velocity>0:
-                    if msg.velocity > max_vel:
-                        max_vel = msg.velocity
+                    max_vel = max(max_vel, msg.velocity)
         if max_vel <= 0:
-            vel_target = None  # nothing to scale
+            vel_target = None
 
     out = mido.MidiFile(type=mid.type, ticks_per_beat=target_ppq)
     for tr in mid.tracks:
@@ -275,7 +271,6 @@ def write_transposed_truncated_forcedppq(src: Path, dst: Path, semitones: Option
             if limit_ticks is not None and t_abs > int(limit_ticks * (target_ppq/ppq)):
                 continue
             if vel_target is not None and m.type=='note_on' and m.velocity>0 and max_vel>0:
-                # scale proportionally: loudest -> vel_target
                 scaled = int(round(m.velocity * (vel_target / max_vel)))
                 m.velocity = max(1, min(127, scaled))
             processed.append((t_abs, m))
@@ -295,11 +290,14 @@ def write_transposed_truncated_forcedppq(src: Path, dst: Path, semitones: Option
 def api_copy():
     data = request.get_json(silent=True) or {}
     files = data.get('files', [])
-    normalize = bool(data.get('normalize', False))
-    max_bars = data.get('max_bars', None)
+    apply_preview = bool(data.get('apply_preview', True))
     force480 = bool(data.get('force480', True))
-    vel_scale = bool(data.get('vel_scale', False))
-    vel_target = data.get('vel_target', None)
+    normalize_to_c = bool(data.get('normalize_to_c', True))
+    max_bars = data.get('max_bars', None)
+    vel_scale = bool(data.get('vel_scale', True))
+    vel_target = data.get('vel_target', 100)
+    chord_tag = data.get('chord_tag', None)
+
     try:
         max_bars = float(max_bars) if max_bars not in (None, '') else None
     except Exception:
@@ -313,693 +311,121 @@ def api_copy():
 
     dest_dir = ROOT / 'selected'
     dest_dir.mkdir(parents=True, exist_ok=True)
-    copied = []
-    errors = []
+    copied, errors = [], []
+
     for rel in files:
         try:
             src = (ROOT / rel).resolve()
-            if not str(src).startswith(str(ROOT.resolve())):
-                raise RuntimeError("Outside root")
-            if not src.exists() or src.suffix.lower()!='.mid':
-                raise RuntimeError("not a .mid or missing")
+            if not str(src).startswith(str(ROOT.resolve())): raise RuntimeError("Outside root")
+            if not src.exists() or src.suffix.lower()!='.mid': raise RuntimeError("not a .mid or missing")
             info = analyze_midi(src)
             semis = None
             orgroot = None
-            if normalize and info.get('transpose_to_C_same_mode') is not None:
+            mode = info.get('mode') or ''
+            if apply_preview and normalize_to_c and info.get('transpose_to_C_same_mode') is not None:
                 semis = int(info['transpose_to_C_same_mode']) % 12
                 orgroot = 'C'
             elif info.get('root'):
                 orgroot = info['root']
-            mode = info.get('mode') or ''
+
             suffix_parts = []
-            if semis is not None:
-                suffix_parts.append(f"C {mode.capitalize()}" if mode else "C")
-            if max_bars and max_bars > 0:
+            if semis is not None: suffix_parts.append(f"C {mode.capitalize()}" if mode else "C")
+            if apply_preview and max_bars and max_bars > 0:
                 suffix_parts.append(f"max{int(max_bars)}bar" if float(max_bars).is_integer() else f"max{max_bars}bar")
             class_map = {'rhythmic_single_note':'Rhythmic','monophonic_melodic':'Mono','polyphonic_chordal':'Poly'}
             ctag = class_map.get(info.get('classification',''), '')
             if ctag: suffix_parts.append(ctag)
             if orgroot: suffix_parts.append(f"OrgRoot={orgroot}")
-            if vel_scale and vel_target is not None:
+            if apply_preview and vel_scale and vel_target is not None:
                 suffix_parts.append(f"VelMax={vel_target}")
+            # chord tag
+            if chord_tag:
+                safe = re.sub(r'[^A-Za-z0-9#b\-]+', '', chord_tag)
+                if safe:
+                    if len(safe) > 60: safe = safe[:60]
+                    suffix_parts.append(f"Chords={safe}")
+
             dstname = src.stem + (' - ' + ' '.join(suffix_parts) if suffix_parts else '') + src.suffix
             dst = dest_dir / dstname
-            write_transposed_truncated_forcedppq(src, dst, semis, max_bars, 480 if force480 else None, vel_target if vel_scale else None)
+            write_transposed_truncated_forcedppq(
+                src, dst,
+                semis,
+                max_bars if (apply_preview) else None,
+                480 if force480 else None,
+                vel_target if (apply_preview and vel_scale) else None
+            )
             copied.append(str(dst.relative_to(ROOT)))
         except Exception as e:
             errors.append({"file": rel, "error": str(e)})
-    return jsonify({"copied": copied, "errors": errors, "dest": str(dest_dir.relative_to(ROOT)), "normalized": normalize, "max_bars": max_bars, "force480": force480, "vel_scaled": vel_scale, "vel_target": vel_target})
+    return jsonify({"copied": copied, "errors": errors, "dest": str(dest_dir.relative_to(ROOT)), "applied_preview": apply_preview, "force480": force480})
 
 @app.route('/api/export_zip', methods=['POST'])
 def api_export_zip():
     data = request.get_json(silent=True) or {}
     files = data.get('files', [])
-    normalize = bool(data.get('normalize', False))
-    max_bars = data.get('max_bars', None)
+    apply_preview = bool(data.get('apply_preview', True))
     force480 = bool(data.get('force480', True))
-    vel_scale = bool(data.get('vel_scale', False))
-    vel_target = data.get('vel_target', None)
-    try:
-        max_bars = float(max_bars) if max_bars not in (None, '') else None
-    except Exception:
-        max_bars = None
+    normalize_to_c = bool(data.get('normalize_to_c', True))
+    max_bars = data.get('max_bars', None)
+    vel_scale = bool(data.get('vel_scale', True))
+    vel_target = data.get('vel_target', 100)
+    chord_tag = data.get('chord_tag', None)
+
+    try: max_bars = float(max_bars) if max_bars not in (None, '') else None
+    except Exception: max_bars = None
     try:
         vel_target = int(vel_target) if vel_target not in (None, '') else None
-        if vel_target is not None:
-            vel_target = max(1, min(127, vel_target))
-    except Exception:
-        vel_target = None
+        if vel_target is not None: vel_target = max(1, min(127, vel_target))
+    except Exception: vel_target = None
 
     mem_zip = io.BytesIO()
     with zipfile.ZipFile(mem_zip, mode='w', compression=zipfile.ZIP_DEFLATED) as zf:
         for rel in files:
             try:
                 src = (ROOT / rel).resolve()
-                if not str(src).startswith(str(ROOT.resolve())):
-                    raise RuntimeError("Outside root")
-                if not src.exists() or src.suffix.lower()!='.mid':
-                    raise RuntimeError("not a .mid or missing")
+                if not str(src).startswith(str(ROOT.resolve())): raise RuntimeError("Outside root")
+                if not src.exists() or src.suffix.lower()!='.mid': raise RuntimeError("not a .mid or missing")
                 info = analyze_midi(src)
                 semis = None
                 orgroot = None
-                if normalize and info.get('transpose_to_C_same_mode') is not None:
+                mode = info.get('mode') or ''
+                if apply_preview and normalize_to_c and info.get('transpose_to_C_same_mode') is not None:
                     semis = int(info['transpose_to_C_same_mode']) % 12
                     orgroot = 'C'
                 elif info.get('root'):
                     orgroot = info['root']
-                mode = info.get('mode') or ''
+
                 suffix_parts = []
-                if semis is not None:
-                    suffix_parts.append(f"C {mode.capitalize()}" if mode else "C")
-                if max_bars and max_bars > 0:
+                if semis is not None: suffix_parts.append(f"C {mode.capitalize()}" if mode else "C")
+                if apply_preview and max_bars and max_bars > 0:
                     suffix_parts.append(f"max{int(max_bars)}bar" if float(max_bars).is_integer() else f"max{max_bars}bar")
                 class_map = {'rhythmic_single_note':'Rhythmic','monophonic_melodic':'Mono','polyphonic_chordal':'Poly'}
                 ctag = class_map.get(info.get('classification',''), '')
                 if ctag: suffix_parts.append(ctag)
                 if orgroot: suffix_parts.append(f"OrgRoot={orgroot}")
-                if vel_scale and vel_target is not None:
+                if apply_preview and vel_scale and vel_target is not None:
                     suffix_parts.append(f"VelMax={vel_target}")
+                if chord_tag:
+                    safe = re.sub(r'[^A-Za-z0-9#b\-]+', '', chord_tag)
+                    if safe:
+                        if len(safe) > 60: safe = safe[:60]
+                        suffix_parts.append(f"Chords={safe}")
                 dstname = src.stem + (' - ' + ' '.join(suffix_parts) if suffix_parts else '') + src.suffix
 
-                # Write processed MIDI into memory, then add to zip
-                tmp_buf = io.BytesIO()
-                mid = mido.MidiFile()
-                # We'll reuse file writer function but to a temporary path; to avoid FS, we replicate logic:
-                # Simpler: write to a temp file on disk then read; but in-memory is better.
-                # We'll write to a NamedTemporaryFile? For simplicity, process to a temp path then read bytes.
                 tmp_path = ROOT / ('._tmp_export_' + dstname)
-                write_transposed_truncated_forcedppq(src, tmp_path, semis, max_bars, 480 if force480 else None, vel_target if vel_scale else None)
+                write_transposed_truncated_forcedppq(src, tmp_path,
+                    semis,
+                    max_bars if apply_preview else None,
+                    480 if force480 else None,
+                    vel_target if (apply_preview and vel_scale) else None)
                 with open(tmp_path, 'rb') as fh:
                     zf.writestr(dstname, fh.read())
-                try:
-                    tmp_path.unlink()
-                except Exception:
-                    pass
+                try: tmp_path.unlink()
+                except Exception: pass
             except Exception as e:
-                # Write a small text error into the zip to signal which file failed
                 zf.writestr(f"ERROR_{Path(rel).name}.txt", str(e))
-
     mem_zip.seek(0)
     return send_file(mem_zip, mimetype='application/zip', as_attachment=True, download_name='exported_clips.zip')
-
-INDEX_HTML = r"""<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>WebMIDI Clip Manager</title>
-  <style>
-    :root { --bg:#0b0d10; --fg:#e6edf3; --muted:#a9b1ba; --card:#12161a; --accent:#6bb3ff; --grid:#1a2530; }
-    html, body { height:100%; }
-    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-           background:var(--bg); color:var(--fg); }
-    h1 { margin:0; font-size:16px; letter-spacing:.2px; }
-    .grid { display:grid; height:98vh; grid-template-columns: 1fr 1fr;
-            grid-template-rows: 0.42fr 0.58fr;
-            grid-template-areas: "controls details" "list roll"; gap:10px; padding:10px 12px; }
-    .panel { background:var(--card); border:1px solid #182028; border-radius:12px; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
-    .panel header { padding:8px 10px; background:#0f141a; border-bottom:1px solid #182028; }
-    .panel header h2 { margin:0; font-size:13px; color:#cdd6df; }
-    .body { padding:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:flex-start; overflow:auto; }
-    .tool { background:#0f151b; padding:8px 10px; border-radius:10px; border:1px solid #1a222c; }
-    .tool label { font-size:11px; color:#a9b1ba; display:block; margin-bottom:4px; }
-    .tool select, .tool .opts, .tool input { font-size:13px; }
-    .btn { background:#1a73e8; color:#fff; border:none; border-radius:8px; padding:8px 10px; cursor:pointer; font-weight:600; }
-    .btn.secondary { background:#1f2937; color:#e6edf3; border:1px solid #2b3542; }
-    .btn.destructive { background:#d14343; }
-    .btn:disabled { opacity:.6; cursor:not-allowed; }
-    .status { font-size:12px; color:#a9b1ba; }
-    input[type="text"], input[type="number"] { background:#0d131a; color:#e6edf3; border:1px solid #202833; border-radius:8px; padding:6px 8px; }
-    #chanOpts { display:grid; grid-template-columns: repeat(8, auto); column-gap:6px; row-gap:2px; }
-    #fileList { overflow:auto; }
-    .row { display:grid; grid-template-columns: 24px 1fr auto auto; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #151b21; }
-    .row:hover { background:#0f1419; }
-    .name { cursor:pointer; font-weight:600; font-size:13px; }
-    .pill { font-size:10px; padding:2px 6px; border-radius:12px; background:#0e1620; border:1px solid #1c2228; color:#cfd6dd; margin-left:4px; white-space:nowrap; }
-    .pill.warn { border-color:#e55353; color:#ff9a9a; }
-    .controls button { margin-left:6px; background:#1f2937; color:#e6edf3; border:1px solid #2b3542; border-radius:6px; padding:4px 8px; cursor:pointer; }
-    .controls button:hover { border-color:#3c4858; }
-    .playing { color:#7ee787; }
-    #rollWrap { overflow:auto; height:100%; background:#0b1016; }
-    #rollSvg { width:100%; height:100%; }
-    .gridline { stroke: #1a2530; stroke-width:1; }
-    .barline { stroke: #233141; stroke-width:1.2; }
-    .loopline { stroke: #ff5555; stroke-width:1.5; }
-    .note { stroke: rgba(0,0,0,0.4); stroke-width:0.5; }
-    .note.active { stroke: #ffffff; stroke-width:1; }
-    .marker { fill: #d1e4ff; }
-    .playhead { stroke: #88c0ff; stroke-width:1.5; }
-  </style>
-  <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.min.js"></script>
-</head>
-<body>
-  <div class="grid">
-    <section class="panel" style="grid-area:controls;">
-      <header><h2>Controls</h2></header>
-      <div class="body">
-        <div class="tool">
-          <label>Output</label>
-          <select id="midiOut"></select>
-        </div>
-        <div class="tool">
-          <label>MIDI Channel</label>
-          <div class="opts" id="chanOpts"></div>
-        </div>
-        <div class="tool">
-          <label>Tempo</label>
-          <div class="opts">
-            <label><input type="radio" name="tempo" value="60">60</label>
-            <label><input type="radio" name="tempo" value="90">90</label>
-            <label><input type="radio" name="tempo" value="120" checked>120</label>
-            <label><input type="radio" name="tempo" value="150">150</label>
-          </div>
-        </div>
-        <div class="tool">
-          <label>Normalize to C (preview)</label>
-          <div>
-            <button class="btn secondary" id="toggleNormalize">Off</button>
-            <button class="btn secondary" id="undoNormalize">Undo</button>
-          </div>
-        </div>
-        <div class="tool">
-          <label>Velocity scaling (preview)</label>
-          <div>
-            <label><input type="checkbox" id="velScaleToggle"> Enable</label>
-            <label>Target loudest: <input type="number" id="velTarget" min="1" max="127" value="100" style="width:70px"></label>
-          </div>
-        </div>
-        <div class="tool">
-          <label>Max bars (preview)</label>
-          <div><input type="number" id="maxBars" min="1" step="0.5" value="4" style="width:70px"></div>
-        </div>
-        <div class="tool">
-          <label>Round loop to power-of-two bars</label>
-          <div><input type="checkbox" id="roundP2"></div>
-        </div>
-        <div class="tool">
-          <label>Yamaha mode (export)</label>
-          <div><label><input type="checkbox" id="force480" checked> Force 480 PPQN</label></div>
-        </div>
-        <div class="tool">
-          <label>Export velocity scaling</label>
-          <div>
-            <label><input type="checkbox" id="velScaleExport"> Enable</label>
-            <label>Target loudest: <input type="number" id="velTargetExport" min="1" max="127" value="100" style="width:70px"></label>
-          </div>
-        </div>
-        <div class="tool">
-          <label>Playback</label>
-          <button class="btn destructive" id="stopAll">Stop All</button>
-        </div>
-        <div class="tool">
-          <label>Filter</label>
-          <input type="text" id="filterBox" placeholder="Search name/key/mode"/>
-        </div>
-        <div class="tool">
-          <label>Export selected</label>
-          <div class="opts" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-            <label><input type="checkbox" id="normalizeOnCopy"/> Apply normalization</label>
-            <label>Max bars: <input type="number" id="maxBarsCopy" min="1" step="0.5" value="4" style="width:70px"></label>
-            <button id="copySelected">Copy → <b>/selected</b></button>
-            <button id="zipSelected">Download ZIP</button>
-            <button id="pack4">Pack 4 tracks (Yamaha)</button>
-          </div>
-        </div>
-        <div class="status" id="status">Loading…</div>
-      </div>
-    </section>
-
-    <section class="panel" style="grid-area:details;">
-      <header><h2>Analysis</h2></header>
-      <div class="body" id="details" style="min-height:110px"></div>
-    </section>
-
-    <section class="panel" style="grid-area:list;">
-      <header><h2>Files</h2></header>
-      <div class="body" id="fileList"></div>
-    </section>
-
-    <section class="panel" style="grid-area:roll;">
-      <header><h2>Piano Roll</h2></header>
-      <div id="rollWrap">
-        <svg id="rollSvg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60" preserveAspectRatio="xMinYMin meet"></svg>
-      </div>
-    </section>
-  </div>
-
-<script>
-let midiAccess = null;
-let currentOut = null;
-let useSynth = false;
-let ac = null, master = null;
-let currentChannel = 1;
-let currentTempo = 120;
-let playing = null; // { id, timers:[], loopLen, startMs, playheadTimer }
-let fileData = [];
-let normalizePreview = false;
-let normalizeHistory = [];
-let activeVoices = new Map();
-let velScaleEnabled = false;
-let velTarget = 100;
-let roundP2 = false;
-
-let currentRenderNotes = []; // for drawing + highlight [{t,d,p,idx}...]
-let currentRectMap = new Map(); // idx -> rect element
-let playheadTimer = null;
-
-// Channels 2x8
-(function buildChanRadios(){
-  const cont = document.getElementById('chanOpts');
-  for(let i=1;i<=16;i++){
-    const lab=document.createElement('label');
-    lab.innerHTML = '<input type="radio" name="chan" value="'+i+'" '+(i===1?'checked':'')+'>'+i;
-    cont.appendChild(lab);
-  }
-  cont.addEventListener('change', e => { if(e.target.name==='chan'){ currentChannel = parseInt(e.target.value); } });
-})();
-
-// Tempo
-document.querySelectorAll('input[name="tempo"]').forEach(r => {
-  r.addEventListener('change', e => { currentTempo = parseInt(e.target.value); if(playing){ restartCurrent(); } });
-});
-
-// Velocity preview
-document.getElementById('velScaleToggle').addEventListener('change', e => { velScaleEnabled = !!e.target.checked; if(playing){ restartCurrent(); } });
-document.getElementById('velTarget').addEventListener('change', e => {
-  const v = parseInt(e.target.value); velTarget = Math.max(1, Math.min(127, isNaN(v)?100:v));
-  e.target.value = velTarget; if(playing){ restartCurrent(); }
-});
-
-// Normalize toggle
-const toggleBtn = document.getElementById('toggleNormalize');
-const undoBtn = document.getElementById('undoNormalize');
-function updateNormalizeUI(){ toggleBtn.textContent = normalizePreview ? 'On' : 'Off'; toggleBtn.classList.toggle('secondary', true); }
-toggleBtn.addEventListener('click', () => { normalizeHistory.push(normalizePreview); normalizePreview = !normalizePreview; updateNormalizeUI(); if(playing){ restartCurrent(); } });
-undoBtn.addEventListener('click', () => { if(normalizeHistory.length){ normalizePreview = normalizeHistory.pop(); updateNormalizeUI(); if(playing){ restartCurrent(); } } });
-updateNormalizeUI();
-
-// P2 rounding
-document.getElementById('roundP2').addEventListener('change', e => { roundP2 = !!e.target.checked; if(playing){ restartCurrent(); } });
-
-function restartCurrent(){
-  if(!playing) return;
-  const row = document.getElementById('row-'+cssEscape(playing.id));
-  if(row){
-    const rel = decodeURIComponent(row.querySelector('.play').dataset.rel);
-    playLoop(rel, playing.id);
-  }
-}
-
-// Built-in synth
-function ensureAC(){
-  if(!ac){
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    ac = new Ctx();
-    master = ac.createGain();
-    master.gain.value = 0.8;
-    master.connect(ac.destination);
-  }
-}
-function hzFromMidi(n){ return 440 * Math.pow(2, (n-69)/12); }
-function synthNoteOn(note, vel=100){
-  ensureAC();
-  const t = ac.currentTime;
-  const osc = ac.createOscillator();
-  const gain = ac.createGain();
-  osc.type = 'sawtooth';
-  osc.frequency.setValueAtTime(hzFromMidi(note), t);
-  const v = Math.max(0.03, Math.pow((vel/127), 1.3) * 0.35);
-  gain.gain.setValueAtTime(0, t);
-  gain.gain.linearRampToValueAtTime(v, t + 0.01);
-  osc.connect(gain).connect(master);
-  osc.start(t);
-  activeVoices.set(note, {osc, gain});
-}
-function synthNoteOff(note){
-  if(!ac) return;
-  const v = activeVoices.get(note);
-  if(!v) return;
-  const t = ac.currentTime;
-  v.gain.gain.cancelScheduledValues(t);
-  v.gain.gain.setTargetAtTime(0.0001, t, 0.03);
-  v.osc.stop(t + 0.1);
-  activeVoices.delete(note);
-}
-function synthAllNotesOff(){ if(!ac) return; for(const note of Array.from(activeVoices.keys())) synthNoteOff(note); }
-
-// WebMIDI
-async function initMIDI(){
-  try{ midiAccess = await navigator.requestMIDIAccess({ sysex:false }); }catch(e){ midiAccess = null; }
-  refreshOutputs();
-  if(midiAccess){ midiAccess.onstatechange = refreshOutputs; }
-}
-function refreshOutputs(){
-  const sel = document.getElementById('midiOut');
-  const was = sel.value; sel.innerHTML = '';
-  const optSynth = document.createElement('option'); optSynth.value='builtin'; optSynth.text='Built-in Synth'; sel.appendChild(optSynth);
-  if(midiAccess){ [...midiAccess.outputs.values()].forEach(o=>{ const opt=document.createElement('option'); opt.value=o.id; opt.text=o.name; sel.appendChild(opt); }); }
-  let pickVal = (was && [...sel.options].some(o=>o.value===was)) ? was : 'builtin';
-  sel.value = pickVal; setOutput(pickVal);
-}
-function setOutput(id){
-  useSynth = (id === 'builtin');
-  if(!useSynth && midiAccess){ currentOut = [...midiAccess.outputs.values()].find(o=>o.id===id) || null; } else { currentOut = null; }
-}
-document.getElementById('midiOut').addEventListener('change', e => setOutput(e.target.value));
-
-// MIDI send
-function noteOn(note, vel=100){
-  if(useSynth){ synthNoteOn(note, vel); return; }
-  if(!currentOut) return;
-  const ch = (currentChannel-1) & 0x0F;
-  currentOut.send([0x90 | ch, note & 0x7F, vel & 0x7F]);
-}
-function noteOff(note){
-  if(useSynth){ synthNoteOff(note); return; }
-  if(!currentOut) return;
-  const ch = (currentChannel-1) & 0x0F;
-  currentOut.send([0x80 | ch, note & 0x7F, 0]);
-}
-
-// Helpers
-function cssEscape(s){ return s.replace(/[^a-zA-Z0-9_-]/g, '_'); }
-function pill(text){ return `<span class="pill">${text}</span>`; }
-function labelMode(m){ const map={ionian:'Maj', aeolian:'min', lydian:'Lyd', mixolydian:'Mix', dorian:'Dor', phrygian:'Phr'}; return map[m] || m; }
-function barDurationSeconds(ts, bpm){ const [num, den] = ts.split('/').map(x=>parseInt(x,10)); const q = 60 / bpm; return num * q * (4/den); }
-function nextP2(bars){ let p=1; while(p<bars) p<<=1; return p; }
-
-// SVG Piano Roll
-function drawRollSVG(renderNotes, loopLenSec, barSec){
-  const svg = document.getElementById('rollSvg');
-  while(svg.firstChild) svg.removeChild(svg.firstChild);
-  if(!renderNotes.length){ svg.setAttribute('viewBox','0 0 100 60'); return; }
-  let minPitch = Math.min(...renderNotes.map(n=>n.p)), maxPitch = Math.max(...renderNotes.map(n=>n.p));
-  const prange = Math.max(12, maxPitch-minPitch+1);
-  const bars = Math.max(1, Math.ceil(loopLenSec / barSec));
-  const pxPerBar = 220;
-  const rowH = 8;
-  const W = bars*pxPerBar + 60;
-  const H = prange*rowH + 24;
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-
-  const bg = document.createElementNS('http://www.w3.org/2000/svg','rect');
-  bg.setAttribute('x',0); bg.setAttribute('y',0); bg.setAttribute('width',W); bg.setAttribute('height',H); bg.setAttribute('fill','#0a0f14');
-  svg.appendChild(bg);
-
-  for(let b=0;b<=bars;b++){
-    const x = b*pxPerBar;
-    const gl = document.createElementNS('http://www.w3.org/2000/svg','line');
-    gl.setAttribute('x1',x+0.5); gl.setAttribute('y1',0); gl.setAttribute('x2',x+0.5); gl.setAttribute('y2',H);
-    gl.setAttribute('class', b%4===0 ? 'barline' : 'gridline');
-    svg.appendChild(gl);
-    const t = document.createElementNS('http://www.w3.org/2000/svg','text');
-    t.setAttribute('x', x+4); t.setAttribute('y', 10); t.setAttribute('fill','#7a8696'); t.setAttribute('font-size','10'); t.textContent = String(b);
-    svg.appendChild(t);
-  }
-  for(let i=0;i<prange;i++){
-    const pc = (minPitch + i) % 12;
-    if(pc===1||pc===3||pc===6||pc===8||pc===10){
-      const y = (prange-1-i)*rowH + 18;
-      const r = document.createElementNS('http://www.w3.org/2000/svg','rect');
-      r.setAttribute('x',0); r.setAttribute('y',y-rowH); r.setAttribute('width',W); r.setAttribute('height',rowH);
-      r.setAttribute('fill','rgba(255,255,255,0.02)');
-      svg.appendChild(r);
-    }
-  }
-  function velColor(v){ const t=v/127; const r=Math.round(80+t*110), g=Math.round(120+t*80), b=Math.round(200-t*120); return `rgb(${r},${g},${b})`; }
-  currentRectMap.clear();
-  for(const n of renderNotes){
-    const x = (n.t / barSec) * pxPerBar;
-    if(x >= W) continue;
-    const widthSec = Math.min(n.d, Math.max(0, loopLenSec - n.t));
-    if(widthSec <= 0) continue;
-    const w = Math.max(2, Math.min((widthSec / barSec) * pxPerBar, pxPerBar*8));
-    const y = (maxPitch - n.p) * rowH + 18;
-    const rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
-    rect.setAttribute('x',x); rect.setAttribute('y',y-6); rect.setAttribute('width',w); rect.setAttribute('height',6);
-    rect.setAttribute('fill', velColor(n.v)); rect.setAttribute('class','note');
-    svg.appendChild(rect);
-    const m = document.createElementNS('http://www.w3.org/2000/svg','circle');
-    m.setAttribute('cx', x+1.5); m.setAttribute('cy', y-3); m.setAttribute('r', 1.5); m.setAttribute('class','marker');
-    svg.appendChild(m);
-    currentRectMap.set(n.idx, rect);
-  }
-  const loopX = (loopLenSec / barSec) * pxPerBar;
-  const ll = document.createElementNS('http://www.w3.org/2000/svg','line');
-  ll.setAttribute('x1',loopX+0.5); ll.setAttribute('y1',0); ll.setAttribute('x2',loopX+0.5); ll.setAttribute('y2',H); ll.setAttribute('class','loopline');
-  svg.appendChild(ll);
-
-  // Playhead line (updated by timer)
-  const ph = document.createElementNS('http://www.w3.org/2000/svg','line');
-  ph.setAttribute('x1',0); ph.setAttribute('y1',0); ph.setAttribute('x2',0); ph.setAttribute('y2',H); ph.setAttribute('class','playhead');
-  ph.setAttribute('id','playhead');
-  svg.appendChild(ph);
-}
-
-// Playback with live indicators
-async function playLoop(relpath, rowId){
-  stopAll();
-  const url = '/api/raw?file='+encodeURIComponent(relpath);
-  const midi = await Midi.fromUrl(url);
-  const origBpm = (midi.header.tempos && midi.header.tempos.length) ? midi.header.tempos[0].bpm : 120;
-  const scale = origBpm / currentTempo;
-
-  const meta = fileData.find(f => f.relpath===relpath) || {};
-  const normSemis = (normalizePreview && Number.isFinite(meta.transpose_to_C_same_mode)) ? (meta.transpose_to_C_same_mode % 12) : 0;
-  const ts = meta.time_signature || '4/4';
-  const barSec = barDurationSeconds(ts, currentTempo);
-  const maxBarsInput = parseFloat(document.getElementById('maxBars').value);
-  const limitSecs = (!isNaN(maxBarsInput) && maxBarsInput>0) ? maxBarsInput * barSec : Infinity;
-
-  const notes=[]; let maxVelSeen = 1;
-  midi.tracks.forEach(tr => {
-    tr.notes.forEach(n => {
-      let pitch = n.midi + normSemis;
-      while(pitch<0) pitch+=12; while(pitch>127) pitch-=12;
-      const v = Math.round((n.velocity||0.8)*127);
-      if(v>maxVelSeen) maxVelSeen=v;
-      notes.push({ time: n.time*scale, duration:n.duration*scale, midi:pitch, vel:v });
-    });
-  });
-  notes.sort((a,b)=>a.time-b.time);
-  const velFactor = (velScaleEnabled && maxVelSeen>0) ? (velTarget/maxVelSeen) : 1;
-  const natural = midi.duration * scale;
-  const baseLoop = Math.min(natural, limitSecs);
-  const bars = baseLoop / barSec;
-  const finalLoop = roundP2 ? Math.max(barSec, nextP2(Math.max(1, bars)) * barSec) : baseLoop;
-
-  // Build renderNotes + draw
-  currentRenderNotes = notes.map((n, idx)=>({ t:n.time, d:n.duration, p:n.midi, v:Math.max(1, Math.min(127, Math.round(n.vel * velFactor))), idx }))
-                            .filter(n=>n.t < baseLoop);
-  drawRollSVG(currentRenderNotes, finalLoop, barSec);
-
-  // Schedule playback and highlighting
-  const timers=[];
-  const startMs = performance.now();
-  currentRenderNotes.forEach(n => {
-    const v = n.v;
-    const onT = n.t; const offT = Math.min(n.t + n.d, baseLoop);
-    timers.push(setTimeout(()=>{ noteOn(n.p, v); const r = currentRectMap.get(n.idx); if(r){ r.classList.add('active'); } }, Math.max(0, onT*1000)));
-    timers.push(setTimeout(()=>{ noteOff(n.p); const r = currentRectMap.get(n.idx); if(r){ r.classList.remove('active'); } }, Math.max(0, offT*1000)));
-  });
-  // Loop
-  timers.push(setTimeout(()=>{ if(playing && playing.id===rowId){ playLoop(relpath, rowId); } }, Math.max(0, finalLoop*1000)));
-  // Playhead updater
-  const svg = document.getElementById('rollSvg');
-  const ph = () => {
-    const phEl = document.getElementById('playhead');
-    if(!playing || !phEl) return;
-    const elapsed = (performance.now() - playing.startMs) / 1000;
-    const t = elapsed % finalLoop;
-    const barsWide = finalLoop / barSec;
-    const pxPerBar = 220;
-    const x = (t / barSec) * pxPerBar;
-    const vb = svg.getAttribute('viewBox').split(' ').map(Number);
-    const H = vb[3];
-    phEl.setAttribute('x1', x+0.5); phEl.setAttribute('x2', x+0.5); phEl.setAttribute('y1', 0); phEl.setAttribute('y2', H);
-  };
-  playheadTimer = setInterval(ph, 33);
-
-  playing = { id: rowId, timers, loopLen: finalLoop, startMs };
-
-  document.querySelectorAll('.row .name').forEach(el=>el.classList.remove('playing'));
-  const nameEl = document.querySelector(`#row-${cssEscape(rowId)} .name`);
-  if(nameEl){ nameEl.classList.add('playing'); }
-}
-
-function stopAll(){
-  if(playing){
-    playing.timers.forEach(clearTimeout);
-    playing=null;
-  }
-  if(playheadTimer){ clearInterval(playheadTimer); playheadTimer=null; }
-  if(useSynth){ synthAllNotesOff(); }
-  else if(currentOut){
-    for(let ch=0; ch<16; ch++){ currentOut.send([0xB0|ch,123,0]); currentOut.send([0xB0|ch,120,0]); }
-  }
-  document.querySelectorAll('.row .name').forEach(el=>el.classList.remove('playing'));
-  // Remove active highlight
-  currentRectMap.forEach(rect => rect.classList.remove('active'));
-}
-document.getElementById('stopAll').addEventListener('click', stopAll);
-window.addEventListener('beforeunload', stopAll);
-
-// Files
-async function loadFiles(){
-  const res = await fetch('/api/files');
-  const data = await res.json();
-  fileData = data.files;
-  renderList(fileData);
-  document.getElementById('status').textContent = `${data.count} file(s) in ${data.root}`;
-}
-function renderList(files){
-  const box = document.getElementById('fileList'); box.innerHTML='';
-  files.forEach((f) => {
-    const rowId = f.relpath;
-    const div = document.createElement('div');
-    div.className='row'; div.id = 'row-'+cssEscape(rowId);
-    const keytxt = f.root && f.mode ? (f.root + ' ' + labelMode(f.mode)) : 'key: n/a';
-    const classMap = {rhythmic_single_note:'Rhythmic', monophonic_melodic:'Mono', polyphonic_chordal:'Poly'};
-    const classTxt = classMap[f.classification] || '';
-    const warn16 = f.over16_unique ? '<span class="pill warn">>16 notes</span>' : '';
-    const drumHint = f.uses_ch10 ? '<span class="pill">Suggest: Fixed</span>' : '';
-    div.innerHTML = `
-      <div><input type="checkbox" class="pick" data-rel="${encodeURIComponent(f.relpath)}"></div>
-      <div class="name" title="Click to play">${f.filename}
-        ${ warn16 }
-        ${ drumHint }
-        ${ f.time_signature ? `<span class="pill">${f.time_signature}</span>` : '' }
-        ${ f.tempo_bpm ? `<span class="pill">${f.tempo_bpm} bpm</span>` : '' }
-        <span class="pill">${(f.note_count||0)} notes</span>
-        <span class="pill">${(f.unique_pitches||0)} uniq</span>
-        ${ classTxt ? `<span class="pill">${classTxt}</span>` : '' }
-        ${ keytxt ? `<span class="pill">${keytxt}</span>` : '' }
-      </div>
-      <div class="meta"></div>
-      <div class="controls">
-        <button class="play" data-rel="${encodeURIComponent(f.relpath)}">Play</button>
-        <button class="stop" data-rel="${encodeURIComponent(f.relpath)}">Stop</button>
-      </div>
-    `;
-    box.appendChild(div);
-  });
-  box.querySelectorAll('button.play').forEach(b=> b.addEventListener('click', e => {
-    const rel = decodeURIComponent(e.currentTarget.dataset.rel);
-    const id = rel; showDetails(rel); playLoop(rel, id);
-  }));
-  box.querySelectorAll('button.stop').forEach(b=> b.addEventListener('click', stopAll));
-  box.querySelectorAll('.row .name').forEach(n=> n.addEventListener('click', e => {
-    const row = e.currentTarget.closest('.row');
-    const rel = decodeURIComponent(row.querySelector('.play').dataset.rel);
-    const id = rel; showDetails(rel); playLoop(rel, id);
-  }));
-}
-
-// Filter
-document.getElementById('filterBox').addEventListener('input', e => {
-  const q = e.target.value.toLowerCase();
-  const filtered = fileData.filter(f => {
-    const fields = [f.filename, f.root, f.mode, f.time_signature, String(f.tempo_bpm), f.classification];
-    return fields.filter(Boolean).some(s => String(s).toLowerCase().includes(q));
-  });
-  renderList(filtered);
-});
-
-// Copy selected
-document.getElementById('copySelected').addEventListener('click', async () => {
-  const picks = [...document.querySelectorAll('.pick:checked')].map(cb => decodeURIComponent(cb.dataset.rel));
-  if(!picks.length){ alert('No files selected'); return; }
-  const normalizeOnCopy = document.getElementById('normalizeOnCopy').checked;
-  const maxBarsCopy = parseFloat(document.getElementById('maxBarsCopy').value);
-  const force480 = document.getElementById('force480').checked;
-  const velScaleExport = document.getElementById('velScaleExport').checked;
-  const velTargetExport = parseInt(document.getElementById('velTargetExport').value);
-  const res = await fetch('/api/copy', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ files: picks, normalize: normalizeOnCopy, max_bars: isNaN(maxBarsCopy)?null:maxBarsCopy, force480,
-                           vel_scale: velScaleExport, vel_target: isNaN(velTargetExport)?null:velTargetExport }) });
-  const data = await res.json();
-  alert(`Copied ${data.copied.length} file(s) to /${data.dest}${data.normalized? ' (normalized)': ''}${data.max_bars? ' (truncated to '+data.max_bars+' bars)':''}${data.force480? ' (480 PPQN)': ''}${data.vel_scaled? ' (vel max '+data.vel_target+')':''}${data.errors.length? '\nErrors: '+JSON.stringify(data.errors):''}`);
-});
-
-// ZIP selected
-document.getElementById('zipSelected').addEventListener('click', async () => {
-  const picks = [...document.querySelectorAll('.pick:checked')].map(cb => decodeURIComponent(cb.dataset.rel));
-  if(!picks.length){ alert('No files selected'); return; }
-  const normalizeOnCopy = document.getElementById('normalizeOnCopy').checked;
-  const maxBarsCopy = parseFloat(document.getElementById('maxBarsCopy').value);
-  const force480 = document.getElementById('force480').checked;
-  const velScaleExport = document.getElementById('velScaleExport').checked;
-  const velTargetExport = parseInt(document.getElementById('velTargetExport').value);
-
-  const res = await fetch('/api/export_zip', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ files: picks, normalize: normalizeOnCopy, max_bars: isNaN(maxBarsCopy)?null:maxBarsCopy, force480,
-                           vel_scale: velScaleExport, vel_target: isNaN(velTargetExport)?null:velTargetExport }) });
-  if(!res.ok){ alert('ZIP export failed'); return; }
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download = 'exported_clips.zip';
-  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
-});
-
-// Pack 4
-document.getElementById('pack4').addEventListener('click', async () => {
-  const picks = [...document.querySelectorAll('.pick:checked')].map(cb => decodeURIComponent(cb.dataset.rel));
-  if(picks.length===0){ alert('Select 1–4 files to pack'); return; }
-  if(picks.length>4){ alert('Pick at most 4'); return; }
-  const normalizeOnCopy = document.getElementById('normalizeOnCopy').checked;
-  const maxBarsCopy = parseFloat(document.getElementById('maxBarsCopy').value);
-  const res = await fetch('/api/pack4', { method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ files: picks, normalize: normalizeOnCopy, max_bars: isNaN(maxBarsCopy)?null:maxBarsCopy }) });
-  const data = await res.json();
-  if(data.error){ alert('Error: '+data.error); return; }
-  alert(`Wrote ${data.packed} in /${data.dest}`);
-});
-
-function showDetails(rel){
-  const f = fileData.find(x => x.relpath===rel);
-  if(!f){ document.getElementById('details').innerHTML=''; return; }
-  const semis = Number.isFinite(f.transpose_to_C_same_mode) ? f.transpose_to_C_same_mode : 'n/a';
-  const classMap = {rhythmic_single_note:'Rhythmic (single-note)', monophonic_melodic:'Monophonic melodic', polyphonic_chordal:'Polyphonic/chordal'};
-  document.getElementById('details').innerHTML = `
-    <div><b>${f.filename}</b></div>
-    <div>Key/Mode: <b>${f.root? f.root : 'n/a'} ${f.mode? labelMode(f.mode): ''}</b> <i>(${f.key_source || 'unknown'})</i></div>
-    <div>Tempo (file): <b>${f.tempo_bpm || '—'} bpm</b></div>
-    <div>Time Signature: <b>${f.time_signature}</b> | PPQ: <b>${f.ppq}</b></div>
-    <div>Length (est): <b>${f.bars_estimate || 0}</b> bars</div>
-    <div>Notes: <b>${f.note_count}</b> | Unique pitches: <b>${f.unique_pitches}</b> ${f.over16_unique?'<span class="pill warn">>16 (Yamaha limit)</span>':''}</div>
-    <div>Max polyphony: <b>${f.max_polyphony}</b> | Class: <b>${classMap[f.classification]||''}</b></div>
-    <div>Channels: <b>${(f.channels||[]).join(', ')||'n/a'}</b> ${f.uses_ch10?'<span class="pill">Suggest: Fixed</span>':''}</div>
-    <div>Transpose to C (same mode): <b>${semis}</b> semitones</div>
-    <div>Path: <code>${f.relpath}</code></div>
-  `;
-}
-
-initMIDI();
-loadFiles();
-</script>
-</body>
-</html>
-"""
 
 def pack4_build(fpaths: List[Path], normalize: bool, max_bars: Optional[float], force_ppq:int=480) -> Path:
     tmp_tracks = []
@@ -1078,6 +504,658 @@ def api_pack4():
         return jsonify({"packed": str(dst.relative_to(ROOT)), "dest":"selected"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+INDEX_HTML = r"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>WebMIDI Clip Manager</title>
+  <style>
+    :root { --bg:#0b0d10; --fg:#e6edf3; --muted:#a9b1ba; --card:#12161a; --accent:#6bb3ff; --grid:#1a2530; }
+    html, body { height:100%; }
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+           background:var(--bg); color:var(--fg); }
+    .grid { display:grid; height:98vh; grid-template-columns: 1fr 1fr;
+            grid-template-rows: 0.42fr 0.58fr; grid-template-areas: "controls details" "list roll";
+            gap:10px; padding:10px 12px; }
+    .panel { background:var(--card); border:1px solid #182028; border-radius:12px; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
+    .panel header { padding:8px 10px; background:#0f141a; border-bottom:1px solid #182028; }
+    .panel header h2 { margin:0; font-size:13px; color:#cdd6df; }
+    .body { padding:8px; display:flex; gap:8px; align-items:flex-start; overflow:auto; }
+    .col { display:flex; flex-direction:column; gap:8px; }
+    .tool { background:#0f151b; padding:8px 10px; border-radius:10px; border:1px solid #1a222c; }
+    .tool label { font-size:11px; color:#a9b1ba; display:block; margin-bottom:4px; }
+    .tool select, .tool .opts, .tool input { font-size:13px; }
+    .btn { background:#1a73e8; color:#fff; border:none; border-radius:8px; padding:8px 10px; cursor:pointer; font-weight:600; }
+    .btn.secondary { background:#1f2937; color:#e6edf3; border:1px solid #2b3542; }
+    .btn.destructive { background:#d14343; }
+    .floating { position: fixed; bottom: 12px; right: 12px; z-index: 1000; box-shadow: 0 2px 10px rgba(0,0,0,0.4); }
+    .status { font-size:12px; color:#a9b1ba; }
+    input[type="text"], input[type="number"] { background:#0d131a; color:#e6edf3; border:1px solid #202833; border-radius:8px; padding:6px 8px; }
+    /* List */
+    #fileList { overflow:auto; display:flex; flex-direction:column; }
+    #details { display:block; }
+    .kv { display:grid; grid-template-columns: 180px 1fr; gap:6px 12px; align-items:baseline; margin:6px 0; }
+    .kv .k { color:#a9b1ba; font-size:12px; }
+    .kv .v { font-size:13px; font-weight:600; }
+    .row { display:grid; grid-template-columns: 24px 1fr auto auto; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #151b21; }
+    .row:hover { background:#0f1419; }
+    .name { cursor:pointer; font-weight:600; font-size:13px; }
+    .pill { font-size:10px; padding:2px 6px; border-radius:12px; background:#0e1620; border:1px solid #1c2228; color:#cfd6dd; margin-left:4px; white-space:nowrap; }
+    .pill.warn { border-color:#e55353; color:#ff9a9a; }
+    .controls button { margin-left:6px; background:#1f2937; color:#e6edf3; border:1px solid #2b3542; border-radius:6px; padding:4px 8px; cursor:pointer; }
+    .controls button:hover { border-color:#3c4858; }
+    .playing { color:#7ee787; }
+    /* Piano roll */
+    #rollWrap { overflow:auto; height:100%; background:#0b1016; }
+    #rollSvg { width:100%; height:100%; }
+    .gridline { stroke: #1a2530; stroke-width:1; }
+    .barline { stroke: #233141; stroke-width:1.2; }
+    .loopline { stroke: #ff5555; stroke-width:1.5; }
+    .note { stroke: rgba(0,0,0,0.4); stroke-width:0.5; }
+    .note.active { stroke: #ffffff; stroke-width:1; }
+    .marker { fill: #d1e4ff; }
+    .playhead { stroke: #88c0ff; stroke-width:1.5; }
+    .gutter { fill:#0c1118; }
+    .gutterText { fill:#9fb3c8; font-size:10px; }
+    .chordText { fill:#e8f0ff; font-size:12px; font-weight:700; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@tonejs/midi@2.0.28/build/Midi.min.js"></script>
+</head>
+<body>
+  <button id="stopAllFloat" class="btn destructive floating" title="Panic / All Notes Off">Stop All</button>
+  <div class="grid">
+    <section class="panel" style="grid-area:controls;">
+      <header><h2>Controls</h2></header>
+      <div class="body" style="gap:16px;">
+        <div class="col" style="flex:1 1 50%; min-width:320px;">
+          <div class="tool">
+            <label>Output</label>
+            <select id="midiOut"></select>
+          </div>
+          <div class="tool">
+            <label>MIDI Channel</label>
+            <select id="chanSelect"></select>
+          </div>
+          <div class="tool">
+            <label>Tempo</label>
+            <div class="opts">
+              <label><input type="radio" name="tempo" value="60">60</label>
+              <label><input type="radio" name="tempo" value="90">90</label>
+              <label><input type="radio" name="tempo" value="120" checked>120</label>
+              <label><input type="radio" name="tempo" value="150">150</label>
+            </div>
+          </div>
+          <div class="tool">
+            <label>Filter</label>
+            <input type="text" id="filterBox" placeholder="Search name/key/mode"/>
+          </div>
+          <div class="tool">
+            <label>Export selected</label>
+            <div class="opts" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+              <label><input type="checkbox" id="applyPreview" checked> Normalize using preview settings</label>
+              <label><input type="checkbox" id="force480" checked> Force 480 PPQN (Yamaha)</label>
+              <label><input type="checkbox" id="addChordTag"> Add chord progression to filename</label>
+              <button id="copySelected">Copy → <b>/selected</b></button>
+              <button id="zipSelected">Download ZIP</button>
+              <button id="pack4">Pack 4 tracks (Yamaha)</button>
+            </div>
+          </div>
+          <div class="tool">
+            <label>Playback</label>
+            <button class="btn destructive" id="stopAll">Stop All</button>
+          </div>
+          <div class="status" id="status">Loading…</div>
+        </div>
+        <div class="col" style="flex:1 1 40%; min-width:260px;">
+          <div class="tool">
+            <label>Preview settings</label>
+            <div class="opts" style="display:flex; flex-direction:column; gap:6px;">
+              <label><input type="checkbox" id="normC" checked> Normalize to C (same mode)</label>
+              <label><input type="checkbox" id="roundP2" checked> Round loop to power-of-two bars</label>
+              <label>Max bars: <input type="number" id="maxBars" min="1" step="0.5" value="4" style="width:70px"></label>
+              <div>
+                <label><input type="checkbox" id="velScaleToggle" checked> Velocity scaling</label>
+                <label>Target loudest: <input type="number" id="velTarget" min="1" max="127" value="100" style="width:70px"></label>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" style="grid-area:details;">
+      <header><h2>Analysis</h2></header>
+      <div class="body" id="details" style="min-height:110px"></div>
+    </section>
+
+    <section class="panel" style="grid-area:list;">
+      <header><h2>Files</h2></header>
+      <div class="body" id="fileList"></div>
+    </section>
+
+    <section class="panel" style="grid-area:roll;">
+      <header><h2>Piano Roll</h2></header>
+      <div id="rollWrap">
+        <svg id="rollSvg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60" preserveAspectRatio="xMinYMin meet"></svg>
+      </div>
+    </section>
+  </div>
+
+<script>
+let midiAccess=null, currentOut=null, useSynth=false, ac=null, master=null;
+let currentChannel = 1;
+let currentTempo = 120;
+let playing = null; // { id, timers:[], loopLen, startMs }
+let fileData = [];
+let normalizePreview = true;
+let activeVoices = new Map();
+let velScaleEnabled = true;
+let velTarget = 100;
+let roundP2 = true;
+
+let currentRenderNotes = [];
+let currentRectMap = new Map();
+let playheadTimer = null;
+let lastChordSegments = []; // [{t0,t1,label}] for current preview
+
+// MIDI Channel dropdown
+(function buildChanSelect(){
+  const sel = document.getElementById('chanSelect');
+  for(let i=1;i<=16;i++){
+    const opt = document.createElement('option');
+    opt.value=String(i); opt.text=String(i);
+    sel.appendChild(opt);
+  }
+  sel.value = '1';
+  sel.addEventListener('change', e => { currentChannel = parseInt(e.target.value); });
+})();
+
+// Tempo radios
+document.querySelectorAll('input[name="tempo"]').forEach(r => r.addEventListener('change', e => {
+  currentTempo = parseInt(e.target.value);
+  if(playing){ restartCurrent(); }
+}));
+
+// Preview settings
+document.getElementById('velScaleToggle').addEventListener('change', e => { velScaleEnabled = !!e.target.checked; if(playing){ restartCurrent(); } });
+document.getElementById('velTarget').addEventListener('change', e => {
+  const v = parseInt(e.target.value); velTarget = Math.max(1, Math.min(127, isNaN(v)?100:v));
+  e.target.value = velTarget; if(playing){ restartCurrent(); }
+});
+document.getElementById('normC').addEventListener('change', e => { normalizePreview = !!e.target.checked; if(playing){ restartCurrent(); } });
+document.getElementById('roundP2').addEventListener('change', e => { roundP2 = !!e.target.checked; if(playing){ restartCurrent(); } });
+document.getElementById('maxBars').addEventListener('change', e => { if(playing){ restartCurrent(); } });
+
+function restartCurrent(){
+  if(!playing) return;
+  const row = document.getElementById('row-'+cssEscape(playing.id));
+  if(row){
+    const rel = decodeURIComponent(row.querySelector('.play').dataset.rel);
+    playLoop(rel, playing.id);
+  }
+}
+
+// Built-in synth
+function ensureAC(){ if(!ac){ const Ctx = window.AudioContext || window.webkitAudioContext; ac = new Ctx(); master = ac.createGain(); master.gain.value = 0.8; master.connect(ac.destination);} }
+function hzFromMidi(n){ return 440 * Math.pow(2, (n-69)/12); }
+function synthNoteOn(note, vel=100){
+  ensureAC();
+  const t = ac.currentTime;
+  const osc = ac.createOscillator(); const gain = ac.createGain();
+  osc.type='sawtooth'; osc.frequency.setValueAtTime(hzFromMidi(note), t);
+  const v = Math.max(0.03, Math.pow((vel/127), 1.3) * 0.35);
+  gain.gain.setValueAtTime(0, t); gain.gain.linearRampToValueAtTime(v, t+0.01);
+  osc.connect(gain).connect(master); osc.start(t);
+  activeVoices.set(note, {osc, gain});
+}
+function synthNoteOff(note){
+  if(!ac) return; const v = activeVoices.get(note); if(!v) return;
+  const t = ac.currentTime; v.gain.gain.cancelScheduledValues(t); v.gain.gain.setTargetAtTime(0.0001, t, 0.03); v.osc.stop(t+0.1); activeVoices.delete(note);
+}
+function synthAllNotesOff(){ if(!ac) return; for(const n of Array.from(activeVoices.keys())) synthNoteOff(n); }
+
+// WebMIDI
+async function initMIDI(){ try{ midiAccess = await navigator.requestMIDIAccess({ sysex:false }); }catch(e){ midiAccess=null; } refreshOutputs(); if(midiAccess){ midiAccess.onstatechange=refreshOutputs; } }
+function refreshOutputs(){
+  const sel = document.getElementById('midiOut');
+  const was = sel.value; sel.innerHTML='';
+  const optSynth = document.createElement('option'); optSynth.value='builtin'; optSynth.text='Built-in Synth'; sel.appendChild(optSynth);
+  if(midiAccess){ [...midiAccess.outputs.values()].forEach(o=>{ const opt=document.createElement('option'); opt.value=o.id; opt.text=o.name; sel.appendChild(opt); }); }
+  let pickVal = (was && [...sel.options].some(o=>o.value===was)) ? was : 'builtin';
+  sel.value = pickVal; setOutput(pickVal);
+}
+function setOutput(id){ useSynth = (id==='builtin'); if(!useSynth && midiAccess){ currentOut=[...midiAccess.outputs.values()].find(o=>o.id===id)||null; } else { currentOut=null; } }
+document.getElementById('midiOut').addEventListener('change', e => setOutput(e.target.value));
+
+// MIDI send
+function noteOn(note, vel=100){ if(useSynth){ synthNoteOn(note, vel); return; } if(!currentOut) return; const ch=(currentChannel-1)&0x0F; currentOut.send([0x90|ch, note&0x7F, vel&0x7F]); }
+function noteOff(note){ if(useSynth){ synthNoteOff(note); return; } if(!currentOut) return; const ch=(currentChannel-1)&0x0F; currentOut.send([0x80|ch, note&0x7F, 0]); }
+
+// Helpers
+function cssEscape(s){ return s.replace(/[^a-zA-Z0-9_-]/g, '_'); }
+function labelMode(m){ const map={ionian:'Maj', aeolian:'min', lydian:'Lyd', mixolydian:'Mix', dorian:'Dor', phrygian:'Phr'}; return map[m] || m; }
+function barDurationSeconds(ts, bpm){ const [num, den] = ts.split('/').map(x=>parseInt(x,10)); const q = 60/bpm; return num*q*(4/den); }
+function beatDurationSeconds(ts, bpm){ const [num, den] = ts.split('/').map(x=>parseInt(x,10)); const q = 60/bpm; return q; } // quarter-note beat
+function nextP2(bars){ let p=1; while(p<bars) p<<=1; return p; }
+function noteName(n){ const nn = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']; const o = Math.floor(n/12)-1; return nn[n%12]+o; }
+function rootName(pc){ const nn = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']; return nn[((pc%12)+12)%12]; }
+
+// Chord detection
+const CHORD_TEMPLATES = [
+  {name:'maj7', ints:[0,4,7,11]},
+  {name:'7',    ints:[0,4,7,10]},
+  {name:'m7',   ints:[0,3,7,10]},
+  {name:'mMaj7',ints:[0,3,7,11]},
+  {name:'dim7', ints:[0,3,6,9]},
+  {name:'m7b5', ints:[0,3,6,10]},
+  {name:'aug7', ints:[0,4,8,10]},
+
+  {name:'maj',  ints:[0,4,7]},
+  {name:'min',  ints:[0,3,7]},
+  {name:'dim',  ints:[0,3,6]},
+  {name:'aug',  ints:[0,4,8]},
+  {name:'sus2', ints:[0,2,7]},
+  {name:'sus4', ints:[0,5,7]},
+];
+function detectChord(pcs){
+  if(!pcs || pcs.size===0) return null;
+  let best=null;
+  for(let r of pcs){ // prefer roots that are actually present
+    const trans = new Set([...pcs].map(p => ((p - r) % 12 + 12)%12));
+    for(const tpl of CHORD_TEMPLATES){
+      const hit = tpl.ints.filter(i => trans.has(i)).length;
+      const extra = [...trans].filter(i => !tpl.ints.includes(i)).length;
+      const score = hit*10 - extra; // prefer more coverage, fewer extras
+      if(hit>=3 || (hit>=2 && tpl.ints.length===3)){ // require decent coverage
+        if(!best || score>best.score || (score===best.score && tpl.ints.length>best.len)){
+          best = {score, root:r, name:tpl.name, len:tpl.ints.length};
+        }
+      }
+    }
+  }
+  if(!best){
+    // fallback: triad from any three distinct pcs using maj/min guess
+    if(pcs.size>=3){
+      const arr=[...pcs];
+      for(let r of arr){
+        const trans = new Set(arr.map(p => ((p - r) % 12 + 12)%12));
+        if(trans.has(4) && trans.has(7)) return rootName(r);
+        if(trans.has(3) && trans.has(7)) return rootName(r)+'m';
+      }
+    }
+    return null;
+  }
+  const root = rootName(best.root);
+  if(best.name==='maj') return root;
+  if(best.name==='min') return root+'m';
+  return root+best.name;
+}
+function inferChords(renderNotes, ts, loopLen){
+  const beatSec = beatDurationSeconds(ts, currentTempo);
+  const steps = Math.max(1, Math.floor(loopLen / beatSec));
+  const eps = 0.001;
+  const segs = [];
+  let lastLabel = null, segStart = 0;
+  for(let i=0;i<=steps;i++){
+    const t = Math.min(loopLen, i*beatSec + eps);
+    const pcs = new Set();
+    for(const n of renderNotes){
+      if(n.t <= t && (n.t + n.d) > t){ pcs.add(((n.p%12)+12)%12); }
+    }
+    const label = detectChord(pcs);
+    if(i===0){ lastLabel = label; segStart = 0; continue; }
+    if(label !== lastLabel || i===steps){
+      const t1 = Math.min(loopLen, i*beatSec);
+      if(lastLabel){ segs.push({t0:segStart, t1, label:lastLabel}); }
+      segStart = t1; lastLabel = label;
+    }
+  }
+  return segs;
+}
+function chordTagString(segs){
+  const labels = segs.map(s => s.label).filter(Boolean);
+  // compress consecutive duplicates
+  const out=[];
+  for(const L of labels){ if(out.length===0 || out[out.length-1]!==L) out.push(L); }
+  return out.join('-');
+}
+
+// SVG Piano Roll with note name gutter and adaptive scaling + chords
+function drawRollSVG(renderNotes, loopLenSec, barSec, chordSegs){
+  const svg = document.getElementById('rollSvg');
+  while(svg.firstChild) svg.removeChild(svg.firstChild);
+  if(!renderNotes.length){ svg.setAttribute('viewBox','0 0 100 60'); return; }
+  let minPitch = Math.min(...renderNotes.map(n=>n.p)), maxPitch = Math.max(...renderNotes.map(n=>n.p));
+  const prange = Math.max(12, maxPitch-minPitch+1);
+  // Adaptive row height
+  let rowH = 8;
+  if(prange <= 12) rowH = 16;
+  else if(prange <= 24) rowH = 12;
+  else if(prange <= 36) rowH = 10;
+  else rowH = 8;
+  const bars = Math.max(1, Math.ceil(loopLenSec / barSec));
+  const pxPerBar = 220;
+  const gutterW = (rowH >= 12) ? 60 : 36;
+  const chordH = 18;
+  const W = bars*pxPerBar + gutterW + 20;
+  const H = prange*rowH + 24 + chordH;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+  // Background + gutter
+  const bg = document.createElementNS('http://www.w3.org/2000/svg','rect');
+  bg.setAttribute('x',0); bg.setAttribute('y',0); bg.setAttribute('width',W); bg.setAttribute('height',H); bg.setAttribute('fill','#0a0f14');
+  svg.appendChild(bg);
+  const gut = document.createElementNS('http://www.w3.org/2000/svg','rect');
+  gut.setAttribute('x',0); gut.setAttribute('y',chordH); gut.setAttribute('width',gutterW); gut.setAttribute('height',H-chordH); gut.setAttribute('class','gutter');
+  svg.appendChild(gut);
+
+  // Chord labels area
+  if(chordSegs && chordSegs.length){
+    for(const s of chordSegs){
+      const x0 = gutterW + (s.t0 / barSec) * pxPerBar;
+      const x1 = gutterW + (s.t1 / barSec) * pxPerBar;
+      const xm = (x0 + x1)/2;
+      const t = document.createElementNS('http://www.w3.org/2000/svg','text');
+      t.setAttribute('x', xm); t.setAttribute('y', 12); t.setAttribute('text-anchor','middle'); t.setAttribute('class','chordText');
+      t.textContent = s.label;
+      svg.appendChild(t);
+    }
+  }
+
+  // Grid vertical
+  for(let b=0;b<=bars;b++){
+    const x = gutterW + b*pxPerBar;
+    const gl = document.createElementNS('http://www.w3.org/2000/svg','line');
+    gl.setAttribute('x1',x+0.5); gl.setAttribute('y1',chordH); gl.setAttribute('x2',x+0.5); gl.setAttribute('y2',H);
+    gl.setAttribute('class', b%4===0 ? 'barline' : 'gridline');
+    svg.appendChild(gl);
+    const tt = document.createElementNS('http://www.w3.org/2000/svg','text');
+    tt.setAttribute('x', x+4); tt.setAttribute('y', chordH+10); tt.setAttribute('fill','#7a8696'); tt.setAttribute('font-size','10'); tt.textContent = String(b);
+    svg.appendChild(tt);
+  }
+  // Rows + note labels
+  const showAllNames = (rowH >= 12);
+  for(let i=0;i<prange;i++){
+    const midiN = minPitch + i;
+    const pc = midiN % 12;
+    const y = chordH + (prange-1-i)*rowH + 18;
+    if(pc===1||pc===3||pc===6||pc===8||pc===10){
+      const r = document.createElementNS('http://www.w3.org/2000/svg','rect');
+      r.setAttribute('x',gutterW); r.setAttribute('y',y-rowH); r.setAttribute('width',W-gutterW); r.setAttribute('height',rowH); r.setAttribute('fill','rgba(255,255,255,0.02)');
+      svg.appendChild(r);
+    }
+    if(showAllNames || pc===0){
+      const text = document.createElementNS('http://www.w3.org/2000/svg','text');
+      text.setAttribute('x', gutterW-6); text.setAttribute('y', y-2);
+      text.setAttribute('text-anchor','end'); text.setAttribute('class','gutterText');
+      text.textContent = noteName(midiN);
+      svg.appendChild(text);
+    }
+  }
+  // Notes
+  function velColor(v){ const t=v/127; const r=Math.round(80+t*110), g=Math.round(120+t*80), b=Math.round(200-t*120); return `rgb(${r},${g},${b})`; }
+  currentRectMap.clear();
+  for(const n of renderNotes){
+    const x = gutterW + (n.t / barSec) * pxPerBar;
+    if(x >= W) continue;
+    const widthSec = Math.min(n.d, Math.max(0, loopLenSec - n.t));
+    if(widthSec <= 0) continue;
+    const w = Math.max(2, Math.min((widthSec / barSec) * pxPerBar, pxPerBar*8));
+    const y = chordH + (maxPitch - n.p) * rowH + 18;
+    const rect = document.createElementNS('http://www.w3.org/2000/svg','rect');
+    rect.setAttribute('x',x); rect.setAttribute('y',y-6); rect.setAttribute('width',w); rect.setAttribute('height',6);
+    rect.setAttribute('fill', velColor(n.v)); rect.setAttribute('class','note');
+    svg.appendChild(rect);
+    const m = document.createElementNS('http://www.w3.org/2000/svg','circle');
+    m.setAttribute('cx', x+1.5); m.setAttribute('cy', y-3); m.setAttribute('r', 1.5); m.setAttribute('class','marker');
+    svg.appendChild(m);
+    currentRectMap.set(n.idx, rect);
+  }
+  const loopX = gutterW + (loopLenSec / barSec) * pxPerBar;
+  const ll = document.createElementNS('http://www.w3.org/2000/svg','line');
+  ll.setAttribute('x1',loopX+0.5); ll.setAttribute('y1',chordH); ll.setAttribute('x2',loopX+0.5); ll.setAttribute('y2',H); ll.setAttribute('class','loopline');
+  svg.appendChild(ll);
+  const ph = document.createElementNS('http://www.w3.org/2000/svg','line');
+  ph.setAttribute('x1',gutterW+0.5); ph.setAttribute('y1',chordH); ph.setAttribute('x2',gutterW+0.5); ph.setAttribute('y2',H); ph.setAttribute('class','playhead'); ph.setAttribute('id','playhead');
+  svg.appendChild(ph);
+}
+
+// Playback with live indicators + chord inference
+async function playLoop(relpath, rowId){
+  stopAll();
+  const url = '/api/raw?file='+encodeURIComponent(relpath);
+  const midi = await Midi.fromUrl(url);
+  const origBpm = (midi.header.tempos && midi.header.tempos.length) ? midi.header.tempos[0].bpm : 120;
+  const scale = origBpm / currentTempo;
+
+  const meta = fileData.find(f => f.relpath===relpath) || {};
+  const semis = (normalizePreview && Number.isFinite(meta.transpose_to_C_same_mode)) ? (meta.transpose_to_C_same_mode % 12) : 0;
+  const ts = meta.time_signature || '4/4';
+  const barSec = barDurationSeconds(ts, currentTempo);
+  const maxBarsInput = parseFloat(document.getElementById('maxBars').value);
+  const limitSecs = (!isNaN(maxBarsInput) && maxBarsInput>0) ? maxBarsInput * barSec : Infinity;
+
+  const notes=[]; let maxVelSeen = 1;
+  midi.tracks.forEach(tr => {
+    tr.notes.forEach(n => {
+      let pitch = n.midi + semis;
+      while(pitch<0) pitch+=12; while(pitch>127) pitch-=12;
+      const v = Math.round((n.velocity||0.8)*127);
+      if(v>maxVelSeen) maxVelSeen=v;
+      notes.push({ time: n.time*scale, duration:n.duration*scale, midi:pitch, vel:v });
+    });
+  });
+  notes.sort((a,b)=>a.time-b.time);
+  const velFactor = (velScaleEnabled && maxVelSeen>0) ? (velTarget/maxVelSeen) : 1;
+  const natural = midi.duration * scale;
+  const baseLoop = Math.min(natural, limitSecs);
+  const bars = baseLoop / barSec;
+  const finalLoop = roundP2 ? Math.max(barSec, nextP2(Math.max(1, bars)) * barSec) : baseLoop;
+
+  currentRenderNotes = notes.map((n, idx)=>({ t:n.time, d:n.duration, p:n.midi, v:Math.max(1, Math.min(127, Math.round(n.vel * velFactor))), idx }))
+                            .filter(n=>n.t < baseLoop);
+
+  // Chord inference on the preview (excluding padded tail from P2)
+  lastChordSegments = inferChords(currentRenderNotes, ts, baseLoop);
+
+  drawRollSVG(currentRenderNotes, finalLoop, barSec, lastChordSegments);
+
+  const timers=[];
+  const startMs = performance.now();
+  currentRenderNotes.forEach(n => {
+    const onT = n.t; const offT = Math.min(n.t + n.d, baseLoop);
+    timers.push(setTimeout(()=>{ noteOn(n.p, n.v); const r=currentRectMap.get(n.idx); if(r){ r.classList.add('active'); } }, Math.max(0, onT*1000)));
+    timers.push(setTimeout(()=>{ noteOff(n.p); const r=currentRectMap.get(n.idx); if(r){ r.classList.remove('active'); } }, Math.max(0, offT*1000)));
+  });
+  timers.push(setTimeout(()=>{ if(playing && playing.id===rowId){ playLoop(relpath, rowId); } }, Math.max(0, finalLoop*1000)));
+
+  // Playhead timer
+  const svg = document.getElementById('rollSvg');
+  const updatePH = () => {
+    const phEl = document.getElementById('playhead');
+    if(!playing || !phEl) return;
+    const elapsed = (performance.now() - playing.startMs) / 1000;
+    const t = elapsed % finalLoop;
+    const pxPerBar = 220;
+    const x = 60 + (t / barSec) * pxPerBar;
+    const vb = svg.getAttribute('viewBox').split(' ').map(Number);
+    const H = vb[3];
+    phEl.setAttribute('x1', x+0.5); phEl.setAttribute('x2', x+0.5); phEl.setAttribute('y1', 18); phEl.setAttribute('y2', H);
+  };
+  const phIv = setInterval(updatePH, 33);
+
+  playing = { id: rowId, timers, loopLen: finalLoop, startMs };
+  playheadTimer = phIv;
+
+  document.querySelectorAll('.row .name').forEach(el=>el.classList.remove('playing'));
+  const nameEl = document.querySelector(`#row-${cssEscape(rowId)} .name`);
+  if(nameEl){ nameEl.classList.add('playing'); }
+}
+
+function stopAll(){
+  if(playing){ playing.timers.forEach(clearTimeout); playing=null; }
+  if(playheadTimer){ clearInterval(playheadTimer); playheadTimer=null; }
+  if(useSynth){ synthAllNotesOff(); }
+  else if(currentOut){ for(let ch=0; ch<16; ch++){ currentOut.send([0xB0|ch,123,0]); currentOut.send([0xB0|ch,120,0]); } }
+  document.querySelectorAll('.row .name').forEach(el=>el.classList.remove('playing'));
+  currentRectMap.forEach(rect => rect.classList.remove('active'));
+}
+document.getElementById('stopAll').addEventListener('click', stopAll);
+const _saFloat=document.getElementById('stopAllFloat'); if(_saFloat){ _saFloat.addEventListener('click', stopAll); }
+window.addEventListener('beforeunload', stopAll);
+
+// Files
+async function loadFiles(){
+  const res = await fetch('/api/files');
+  const data = await res.json();
+  fileData = data.files;
+  renderList(fileData);
+  document.getElementById('status').textContent = `${data.count} file(s) in ${data.root}`;
+}
+function renderList(files){
+  const box = document.getElementById('fileList'); box.innerHTML='';
+  files.forEach((f) => {
+    const rowId = f.relpath;
+    const div = document.createElement('div');
+    div.className='row'; div.id = 'row-'+cssEscape(rowId);
+    const keytxt = f.root && f.mode ? (f.root + ' ' + labelMode(f.mode)) : 'key: n/a';
+    const classMap = {rhythmic_single_note:'Rhythmic', monophonic_melodic:'Mono', polyphonic_chordal:'Poly'};
+    const classTxt = classMap[f.classification] || '';
+    const warn16 = f.over16_unique ? '<span class="pill warn">>16 unique</span>' : '';
+    const drumHint = f.uses_ch10 ? '<span class="pill">Suggest: Fixed</span>' : '';
+    div.innerHTML = `
+      <div><input type="checkbox" class="pick" data-rel="${encodeURIComponent(f.relpath)}"></div>
+      <div class="name" title="Click to play">${f.filename}
+        ${ warn16 }
+        ${ drumHint }
+        ${ f.time_signature ? `<span class="pill">${f.time_signature}</span>` : '' }
+        ${ f.tempo_bpm ? `<span class="pill">${f.tempo_bpm} bpm</span>` : '' }
+        <span class="pill">${(f.note_count||0)} notes</span>
+        <span class="pill">${(f.unique_pitches||0)} uniq</span>
+        ${ classTxt ? `<span class="pill">${classTxt}</span>` : '' }
+        ${ keytxt ? `<span class="pill">${keytxt}</span>` : '' }
+      </div>
+      <div class="meta"></div>
+      <div class="controls">
+        <button class="play" data-rel="${encodeURIComponent(f.relpath)}">Play</button>
+        <button class="stop" data-rel="${encodeURIComponent(f.relpath)}">Stop</button>
+      </div>
+    `;
+    box.appendChild(div);
+  });
+  box.querySelectorAll('button.play').forEach(b=> b.addEventListener('click', e => {
+    const rel = decodeURIComponent(e.currentTarget.dataset.rel);
+    const id = rel; showDetails(rel); playLoop(rel, id);
+  }));
+  box.querySelectorAll('button.stop').forEach(b=> b.addEventListener('click', stopAll));
+  box.querySelectorAll('.row .name').forEach(n=> n.addEventListener('click', e => {
+    const row = e.currentTarget.closest('.row');
+    const rel = decodeURIComponent(row.querySelector('.play').dataset.rel);
+    const id = rel; showDetails(rel); playLoop(rel, id);
+  }));
+}
+
+// Filter
+document.getElementById('filterBox').addEventListener('input', e => {
+  const q = e.target.value.toLowerCase();
+  const filtered = fileData.filter(f => {
+    const fields = [f.filename, f.root, f.mode, f.time_signature, String(f.tempo_bpm), f.classification];
+    return fields.filter(Boolean).some(s => String(s).toLowerCase().includes(q));
+  });
+  renderList(filtered);
+});
+
+function currentChordTag(){
+  const add = document.getElementById('addChordTag').checked;
+  if(!add || !lastChordSegments || !lastChordSegments.length) return null;
+  const tag = chordTagString(lastChordSegments);
+  return tag || null;
+}
+
+// Copy selected (uses preview states when "applyPreview" is checked)
+document.getElementById('copySelected').addEventListener('click', async () => {
+  const picks = [...document.querySelectorAll('.pick:checked')].map(cb => decodeURIComponent(cb.dataset.rel));
+  if(!picks.length){ alert('No files selected'); return; }
+  const applyPreview = document.getElementById('applyPreview').checked;
+  const force480 = document.getElementById('force480').checked;
+  const res = await fetch('/api/copy', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      files: picks, apply_preview: applyPreview, force480,
+      normalize_to_c: document.getElementById('normC').checked,
+      max_bars: parseFloat(document.getElementById('maxBars').value),
+      vel_scale: document.getElementById('velScaleToggle').checked,
+      vel_target: parseInt(document.getElementById('velTarget').value),
+      chord_tag: currentChordTag()
+    }) });
+  const data = await res.json();
+  if(!res.ok){ alert('Copy failed'); return; }
+  alert(`Copied ${data.copied.length} file(s) to /${data.dest}${data.applied_preview? ' (preview settings applied)': ''}${data.force480? ' (480 PPQN)': ''}${data.errors.length? '\nErrors: '+JSON.stringify(data.errors):''}`);
+});
+
+// ZIP selected
+document.getElementById('zipSelected').addEventListener('click', async () => {
+  const picks = [...document.querySelectorAll('.pick:checked')].map(cb => decodeURIComponent(cb.dataset.rel));
+  if(!picks.length){ alert('No files selected'); return; }
+  const applyPreview = document.getElementById('applyPreview').checked;
+  const force480 = document.getElementById('force480').checked;
+
+  const res = await fetch('/api/export_zip', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      files: picks, apply_preview: applyPreview, force480,
+      normalize_to_c: document.getElementById('normC').checked,
+      max_bars: parseFloat(document.getElementById('maxBars').value),
+      vel_scale: document.getElementById('velScaleToggle').checked,
+      vel_target: parseInt(document.getElementById('velTarget').value),
+      chord_tag: currentChordTag()
+    }) });
+  if(!res.ok){ alert('ZIP export failed'); return; }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'exported_clips.zip';
+  document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+});
+
+// Pack 4 tracks (explicit opts)
+document.getElementById('pack4').addEventListener('click', async () => {
+  const picks = [...document.querySelectorAll('.pick:checked')].map(cb => decodeURIComponent(cb.dataset.rel));
+  if(picks.length===0){ alert('Select 1–4 files to pack'); return; }
+  if(picks.length>4){ alert('Pick at most 4'); return; }
+  const normalizeOnCopy = document.getElementById('normC').checked;
+  const maxBarsCopy = parseFloat(document.getElementById('maxBars').value);
+  const res = await fetch('/api/pack4', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ files: picks, normalize: normalizeOnCopy, max_bars: isNaN(maxBarsCopy)?null:maxBarsCopy }) });
+  const data = await res.json();
+  if(data.error){ alert('Error: '+data.error); return; }
+  alert(`Wrote ${data.packed} in /${data.dest}`);
+});
+
+function showDetails(rel){
+  const f = fileData.find(x => x.relpath===rel);
+  if(!f){ document.getElementById('details').innerHTML=''; return; }
+  const semis = Number.isFinite(f.transpose_to_C_same_mode) ? f.transpose_to_C_same_mode : 'n/a';
+  const classMap = {rhythmic_single_note:'Rhythmic (single-note)', monophonic_melodic:'Monophonic melodic', polyphonic_chordal:'Polyphonic/chordal'};
+  const html = `
+    <div class="kv"><span class="k">File</span><span class="v">${f.filename}</span></div>
+    <div class="kv"><span class="k">Key / Mode</span><span class="v">${f.root? f.root : 'n/a'} ${f.mode? labelMode(f.mode): ''} <i style="font-weight:400;color:#8b95a3;">(${f.key_source || 'unknown'})</i></span></div>
+    <div class="kv"><span class="k">Tempo (file)</span><span class="v">${f.tempo_bpm || '—'} bpm</span></div>
+    <div class="kv"><span class="k">Time Sig / PPQ</span><span class="v">${f.time_signature} • ${f.ppq}</span></div>
+    <div class="kv"><span class="k">Length (est)</span><span class="v">${f.bars_estimate || 0} bars</span></div>
+    <div class="kv"><span class="k">Notes / Unique</span><span class="v">${f.note_count} • ${f.unique_pitches} ${f.over16_unique?'<span class="pill warn">>16 unique (Yamaha limit)</span>':''}</span></div>
+    <div class="kv"><span class="k">Max Poly / Class</span><span class="v">${f.max_polyphony} • ${classMap[f.classification]||''}</span></div>
+    <div class="kv"><span class="k">Channels</span><span class="v">${(f.channels||[]).join(', ')||'n/a'} ${f.uses_ch10?'<span class="pill">Suggest: Fixed</span>':''}</span></div>
+    <div class="kv"><span class="k">Transpose → C</span><span class="v">${semis} semitones</span></div>
+  `;
+  document.getElementById('details').innerHTML = html;
+}
+
+initMIDI();
+loadFiles();
+</script>
+</body>
+</html>
+"""
 
 def main():
     global ROOT

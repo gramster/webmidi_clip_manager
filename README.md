@@ -5,10 +5,10 @@ A local web app to **audition, analyze, trim, and export MIDI phrases** for synt
 - Preview via **WebMIDI** (hardware) **or Built-in Synth** (WebAudio).
 - Loop playback with **tempo**, **channel**, **normalize-to-C**, **velocity scaling**, **max bars**, and **power-of-two** loop rounding.
 - **Clip analysis**: key/mode (from name or analysis), **unique pitch count**, **max polyphony**, and classification (**Rhythmic**, **Mono**, **Poly**).
-- **Export** selected files to `selected/`, with optional **normalization**, **bar-length truncation**, and **velocity scaling (export)**.
+- **Export** selected files to `selected/`, applying **your current preview settings** when you choose *Normalize using preview settings*.
 - **ZIP export** for the current selection.
 - **Yamaha helpers**: 16-note warning, **force 480 PPQN** on export, and **Pack 4 tracks** builder for “Put Track to Arpeggio.”
-- Inline **piano roll** (SVG, vector) with **live playhead** and **active-note highlighting**, plus an **analysis** panel.
+- Inline **piano roll** (SVG, vector) with **live playhead**, **active-note highlighting**, **adaptive vertical scale**, and **note names** on the left.
   
 ![Screenshot](screenshot.png)
 
@@ -41,66 +41,60 @@ A local web app to **audition, analyze, trim, and export MIDI phrases** for synt
 
 ## UI Overview (2×2 layout)
 
-- **Top-Left — Controls**
-  - **Output**: WebMIDI destination or **Built-in Synth**.
-  - **MIDI Channel**: 1–16 in compact 2×8 grid.
-  - **Tempo (preview)**: 60 / 90 / 120 / 150 BPM.  
-    > Preview timing uses `scale = original_bpm / selected_bpm` — 60 is slower than 120.
-  - **Normalize to C (preview)**: Toggle + **Undo**. Preserves mode.
-    - To bake normalization into exports, use **Apply normalization** in the export box.
-  - **Velocity scaling (preview)**: Toggle + **Target loudest** (default 100).
-  - **Max bars (preview)**: Truncates loop length at the current tempo.
-  - **Round loop to power-of-two bars** (preview): Extends loop to 1/2/4/8… bars.
-  - **Yamaha mode (export)**: **Force 480 PPQN** (recommended for Montage/MODX).
-  - **Export velocity scaling** (new): scale note-on velocities so **loudest = target** in the exported file.
-  - **Playback**: **Stop All** immediately stops playback, kills synth voices, and sends All Notes Off.
-  - **Filter**: Search name/key/mode/classification.
-  - **Export selected**:
-    - **Apply normalization** — transpose so the root becomes **C** (same mode).
-    - **Max bars** — truncate exports to this length.
-    - **Copy →** write processed files into `selected/`.
-    - **Download ZIP** — generate a single ZIP of the processed selection.
-    - **Pack 4 tracks (Yamaha)** — make a single SMF Type‑1 at **480 PPQN**, ready for **Put Track to Arpeggio**.
+### Top-Left — Controls (left side)
+- **Output**: WebMIDI destination or **Built-in Synth**.
+- **MIDI Channel**: dropdown 1–16.
+- **Tempo (preview)**: 60 / 90 / 120 / 150 BPM.  
+  > Timing uses `scale = original_bpm / selected_bpm` — 60 is slower than 120.
+- **Filter**: Search name/key/mode/classification.
+- **Export selected**:
+  - **Normalize using preview settings** — applies your current preview options (Normalize-to-C, Max Bars, Velocity scaling) to the exported files.
+  - **Force 480 PPQN (Yamaha)** — recommended for Montage/MODX.
+  - **Copy →** write processed files into `selected/`.
+  - **Download ZIP** — one archive of the processed selection.
+  - **Pack 4 tracks (Yamaha)** — make a single SMF Type-1 at **480 PPQN**, ready for **Put Track to Arpeggio**.
+- **Playback**: **Stop All** ends playback and sends All Notes Off (and kills the built‑in synth voices).
 
-- **Top-Right — Analysis**
-  - Key/Mode (from filename when present; else by analysis)
-  - Tempo, Time Signature, PPQ, Estimated Bars, Note Count
-  - **Unique pitches** with a **>16 warning** (Yamaha arp limit)
-  - **Max polyphony**, classification (**Rhythmic**, **Monophonic**, **Polyphonic**)
-  - Channels used (highlights Ch 10 to suggest **Convert Type: Fixed**)
-  - Semitone shift to **Transpose to C (same mode)**
+### Top-Left — Controls (right side: Preview settings)
+- **Normalize to C (same mode)** — ✅ enabled by default.
+- **Round loop to power-of-two bars** — ✅ enabled by default (preview-only).
+- **Max bars (preview)** — truncates the loop (also used in export when *Normalize using preview settings* is checked).
+- **Velocity scaling (single control)** — ✅ enabled by default for preview and export. Set **Target loudest**; others scale proportionally.
 
-- **Bottom-Left — Files**
-  - Recursive listing of `.mid` files under `--root`
-  - Click a name or **Play** to audition; **Stop** or **Stop All** to end
-  - Pills show time signature, tempo, note count, unique pitches, classification, key/mode
-  - A red warning pill appears when **>16 unique notes**
+### Top-Right — Analysis
+- Key/Mode (from filename when present; else by analysis), tempo, time signature, PPQ, bars, note count
+- **Unique pitches** with a **>16** warning (Yamaha arp limit)
+- **Max polyphony**, classification (**Rhythmic**, **Monophonic**, **Polyphonic**)
+- Channels used (highlights Ch 10 to suggest **Convert Type: Fixed**)
+- Semitone shift to **Transpose to C (same mode)**
 
-- **Bottom-Right — Piano Roll (SVG)**
-  - Vector-based grid and notes for crisp scaling
-  - **Live playhead** and **active-note highlighting**
-  - Velocity-tinted notes, start markers, and a red loop-end line
-  - Reflects current preview transforms (tempo, normalization, velocity scaling, max-bars limit, p2 rounding)
+### Bottom-Left — Files
+- Recursive listing of `.mid` files under `--root`
+- Click a name or **Play** to audition; **Stop** or **Stop All** to end
+- Pills show time signature, tempo, note count, unique pitches, classification, key/mode
+- Red warning pill appears when **>16 unique notes**
+
+### Bottom-Right — Piano Roll (SVG)
+- Vector-based grid and notes for crisp scaling
+- **Adaptive vertical scale** (bigger lanes for compact ranges)
+- **Note names** shown at left (all when compact; **C-only** when range is large)
+- **Live playhead** and **active-note highlighting**
+- Start markers and a red loop-end line
+- Reflects current preview transforms (tempo, normalization, velocity scaling, max-bars limit, p2 rounding)
 
 ---
 
 ## Export Details
 
 - Exports are written to `selected/` under your `--root`.
-- **Copy**:
-  - Optional **Apply normalization** (transpose note numbers only)
-  - Optional **Max bars** (trims events past the boundary and closes sustained notes)
-  - Optional **Force 480 PPQN**
-  - Optional **Velocity scaling (export)** — scales all note-on velocities so the **loudest** equals your **Target**; others are scaled proportionally and clamped 1–127.
-  - Filenames include helpful tags: `C <Mode>`, `max4bar`, classification, `OrgRoot=<X>`, and `VelMax=<N>` when enabled.
-- **Download ZIP**:
-  - Directly downloads a ZIP containing the processed versions of your current selection.
-- **Pack 4 tracks (Yamaha)**:
-  - Builds a single **Type-1** file at **480 PPQN** with up to 4 tracks
-  - Per-track: optional normalization to C and truncation to max bars
-  - Output filename includes source stems + tags
+- When **Normalize using preview settings** is checked:
+  - **Normalize to C** — transposes note numbers to make the detected root become **C** (mode preserved)
+  - **Max bars** — trims events past the boundary and closes sustained notes
+  - **Velocity scaling** — scales all note-on velocities so the **loudest** equals your **Target**; others are scaled proportionally and clamped 1–127
+- **Force 480 PPQN** — recommended for Yamaha Montage/MODX
+- Filenames include tags: `C <Mode>`, `max4bar`, classification, `OrgRoot=<X>`, and `VelMax=<N>` (when enabled).
 
-> Preview velocity scaling is **separate** from export scaling. Enable each where needed.
+> The **Round-to-P2** option is for preview only (does not change exported length).
 
 ---
 
