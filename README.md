@@ -145,8 +145,4 @@ usage: webmidi_clip_manager.py --root PATH [--port PORT]
 - Per‑file preview **transpose slider**.
 - Built‑in **GM‑style** synth voices.
 
----
 
-## License
-
-You can include your preferred license here (MIT recommended for simplicity).
