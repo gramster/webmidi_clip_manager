@@ -3,11 +3,12 @@
 #
 # WebMIDI Clip Manager – preview, analyze, and export MIDI phrases (Yamaha-friendly).
 #
-# Additions in this build:
-# - Chord inference on preview, with labels drawn at the top of the piano roll
-# - Checkbox to include the inferred chord progression in export filenames
-# - Single velocity control (preview/export), Normalize-to-C + Round-to-P2 default ON
-# - Compact MIDI channel dropdown; adaptive piano-roll scaling + note-name gutter
+# This build fixes the regression and includes ONLY the requested UI changes:
+# - Filter field moved to the Files pane header (right side)
+# - Tempo control is a numeric input (default 120 BPM); radio buttons removed
+# - Removed the in-panel "Playback: Stop All" (kept floating Stop All button)
+# It preserves: chord inference + labels, adaptive SVG piano roll w/ playhead fix,
+# two-column Analysis, velocity scaling single control, Normalize-to-C & P2 rounding defaults, etc.
 #
 import argparse
 import re
@@ -338,7 +339,6 @@ def api_copy():
             if orgroot: suffix_parts.append(f"OrgRoot={orgroot}")
             if apply_preview and vel_scale and vel_target is not None:
                 suffix_parts.append(f"VelMax={vel_target}")
-            # chord tag
             if chord_tag:
                 safe = re.sub(r'[^A-Za-z0-9#b\-]+', '', chord_tag)
                 if safe:
@@ -521,6 +521,8 @@ INDEX_HTML = r"""<!doctype html>
             gap:10px; padding:10px 12px; }
     .panel { background:var(--card); border:1px solid #182028; border-radius:12px; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
     .panel header { padding:8px 10px; background:#0f141a; border-bottom:1px solid #182028; }
+    .panel header.hdrflex { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .panel header input[type="text"] { background:#0d131a; color:#e6edf3; border:1px solid #202833; border-radius:8px; padding:6px 8px; font-size:12px; min-width:160px; }
     .panel header h2 { margin:0; font-size:13px; color:#cdd6df; }
     .body { padding:8px; display:flex; gap:8px; align-items:flex-start; overflow:auto; }
     .col { display:flex; flex-direction:column; gap:8px; }
@@ -535,10 +537,6 @@ INDEX_HTML = r"""<!doctype html>
     input[type="text"], input[type="number"] { background:#0d131a; color:#e6edf3; border:1px solid #202833; border-radius:8px; padding:6px 8px; }
     /* List */
     #fileList { overflow:auto; display:flex; flex-direction:column; }
-    #details { display:block; }
-    .kv { display:grid; grid-template-columns: 180px 1fr; gap:6px 12px; align-items:baseline; margin:6px 0; }
-    .kv .k { color:#a9b1ba; font-size:12px; }
-    .kv .v { font-size:13px; font-weight:600; }
     .row { display:grid; grid-template-columns: 24px 1fr auto auto; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #151b21; }
     .row:hover { background:#0f1419; }
     .name { cursor:pointer; font-weight:600; font-size:13px; }
@@ -547,6 +545,11 @@ INDEX_HTML = r"""<!doctype html>
     .controls button { margin-left:6px; background:#1f2937; color:#e6edf3; border:1px solid #2b3542; border-radius:6px; padding:4px 8px; cursor:pointer; }
     .controls button:hover { border-color:#3c4858; }
     .playing { color:#7ee787; }
+    /* Analysis: two-column */
+    #details { display:block; }
+    .kv { display:grid; grid-template-columns: 180px 1fr; gap:6px 12px; align-items:baseline; margin:6px 0; }
+    .kv .k { color:#a9b1ba; font-size:12px; }
+    .kv .v { font-size:13px; font-weight:600; }
     /* Piano roll */
     #rollWrap { overflow:auto; height:100%; background:#0b1016; }
     #rollSvg { width:100%; height:100%; }
@@ -579,17 +582,8 @@ INDEX_HTML = r"""<!doctype html>
             <select id="chanSelect"></select>
           </div>
           <div class="tool">
-            <label>Tempo</label>
-            <div class="opts">
-              <label><input type="radio" name="tempo" value="60">60</label>
-              <label><input type="radio" name="tempo" value="90">90</label>
-              <label><input type="radio" name="tempo" value="120" checked>120</label>
-              <label><input type="radio" name="tempo" value="150">150</label>
-            </div>
-          </div>
-          <div class="tool">
-            <label>Filter</label>
-            <input type="text" id="filterBox" placeholder="Search name/key/mode"/>
+            <label>Tempo (BPM)</label>
+            <input type="number" id="tempoBox" min="20" max="300" step="1" value="120" style="width:90px">
           </div>
           <div class="tool">
             <label>Export selected</label>
@@ -601,10 +595,6 @@ INDEX_HTML = r"""<!doctype html>
               <button id="zipSelected">Download ZIP</button>
               <button id="pack4">Pack 4 tracks (Yamaha)</button>
             </div>
-          </div>
-          <div class="tool">
-            <label>Playback</label>
-            <button class="btn destructive" id="stopAll">Stop All</button>
           </div>
           <div class="status" id="status">Loading…</div>
         </div>
@@ -631,7 +621,7 @@ INDEX_HTML = r"""<!doctype html>
     </section>
 
     <section class="panel" style="grid-area:list;">
-      <header><h2>Files</h2></header>
+      <header class="hdrflex"><h2>Files</h2><input type="text" id="filterBox" placeholder="Filter…"></header>
       <div class="body" id="fileList"></div>
     </section>
 
@@ -672,11 +662,16 @@ let lastChordSegments = []; // [{t0,t1,label}] for current preview
   sel.addEventListener('change', e => { currentChannel = parseInt(e.target.value); });
 })();
 
-// Tempo radios
-document.querySelectorAll('input[name="tempo"]').forEach(r => r.addEventListener('change', e => {
-  currentTempo = parseInt(e.target.value);
-  if(playing){ restartCurrent(); }
-}));
+// Tempo numeric
+const tempoBox = document.getElementById('tempoBox');
+if(tempoBox){
+  tempoBox.addEventListener('change', e => {
+    const v = parseFloat(e.target.value);
+    currentTempo = isNaN(v) ? 120 : Math.max(20, Math.min(300, v));
+    e.target.value = currentTempo;
+    if(playing){ restartCurrent(); }
+  });
+}
 
 // Preview settings
 document.getElementById('velScaleToggle').addEventListener('change', e => { velScaleEnabled = !!e.target.checked; if(playing){ restartCurrent(); } });
@@ -767,8 +762,8 @@ function detectChord(pcs){
     for(const tpl of CHORD_TEMPLATES){
       const hit = tpl.ints.filter(i => trans.has(i)).length;
       const extra = [...trans].filter(i => !tpl.ints.includes(i)).length;
-      const score = hit*10 - extra; // prefer more coverage, fewer extras
-      if(hit>=3 || (hit>=2 && tpl.ints.length===3)){ // require decent coverage
+      const score = hit*10 - extra;
+      if(hit>=3 || (hit>=2 && tpl.ints.length===3)){
         if(!best || score>best.score || (score===best.score && tpl.ints.length>best.len)){
           best = {score, root:r, name:tpl.name, len:tpl.ints.length};
         }
@@ -776,7 +771,6 @@ function detectChord(pcs){
     }
   }
   if(!best){
-    // fallback: triad from any three distinct pcs using maj/min guess
     if(pcs.size>=3){
       const arr=[...pcs];
       for(let r of arr){
@@ -816,7 +810,6 @@ function inferChords(renderNotes, ts, loopLen){
 }
 function chordTagString(segs){
   const labels = segs.map(s => s.label).filter(Boolean);
-  // compress consecutive duplicates
   const out=[];
   for(const L of labels){ if(out.length===0 || out[out.length-1]!==L) out.push(L); }
   return out.join('-');
@@ -829,7 +822,6 @@ function drawRollSVG(renderNotes, loopLenSec, barSec, chordSegs){
   if(!renderNotes.length){ svg.setAttribute('viewBox','0 0 100 60'); return; }
   let minPitch = Math.min(...renderNotes.map(n=>n.p)), maxPitch = Math.max(...renderNotes.map(n=>n.p));
   const prange = Math.max(12, maxPitch-minPitch+1);
-  // Adaptive row height
   let rowH = 8;
   if(prange <= 12) rowH = 16;
   else if(prange <= 24) rowH = 12;
@@ -848,7 +840,6 @@ function drawRollSVG(renderNotes, loopLenSec, barSec, chordSegs){
   svg.setAttribute('data-chordH', String(chordH));
   svg.setAttribute('data-loop', String(loopLenSec));
 
-  // Background + gutter
   const bg = document.createElementNS('http://www.w3.org/2000/svg','rect');
   bg.setAttribute('x',0); bg.setAttribute('y',0); bg.setAttribute('width',W); bg.setAttribute('height',H); bg.setAttribute('fill','#0a0f14');
   svg.appendChild(bg);
@@ -856,7 +847,6 @@ function drawRollSVG(renderNotes, loopLenSec, barSec, chordSegs){
   gut.setAttribute('x',0); gut.setAttribute('y',chordH); gut.setAttribute('width',gutterW); gut.setAttribute('height',H-chordH); gut.setAttribute('class','gutter');
   svg.appendChild(gut);
 
-  // Chord labels area
   if(chordSegs && chordSegs.length){
     for(const s of chordSegs){
       const x0 = gutterW + (s.t0 / barSec) * pxPerBar;
@@ -869,7 +859,6 @@ function drawRollSVG(renderNotes, loopLenSec, barSec, chordSegs){
     }
   }
 
-  // Grid vertical
   for(let b=0;b<=bars;b++){
     const x = gutterW + b*pxPerBar;
     const gl = document.createElementNS('http://www.w3.org/2000/svg','line');
@@ -880,7 +869,6 @@ function drawRollSVG(renderNotes, loopLenSec, barSec, chordSegs){
     tt.setAttribute('x', x+4); tt.setAttribute('y', chordH+10); tt.setAttribute('fill','#7a8696'); tt.setAttribute('font-size','10'); tt.textContent = String(b);
     svg.appendChild(tt);
   }
-  // Rows + note labels
   const showAllNames = (rowH >= 12);
   for(let i=0;i<prange;i++){
     const midiN = minPitch + i;
@@ -899,7 +887,6 @@ function drawRollSVG(renderNotes, loopLenSec, barSec, chordSegs){
       svg.appendChild(text);
     }
   }
-  // Notes
   function velColor(v){ const t=v/127; const r=Math.round(80+t*110), g=Math.round(120+t*80), b=Math.round(200-t*120); return `rgb(${r},${g},${b})`; }
   currentRectMap.clear();
   for(const n of renderNotes){
@@ -962,7 +949,6 @@ async function playLoop(relpath, rowId){
   currentRenderNotes = notes.map((n, idx)=>({ t:n.time, d:n.duration, p:n.midi, v:Math.max(1, Math.min(127, Math.round(n.vel * velFactor))), idx }))
                             .filter(n=>n.t < baseLoop);
 
-  // Chord inference on the preview (excluding padded tail from P2)
   lastChordSegments = inferChords(currentRenderNotes, ts, baseLoop);
 
   drawRollSVG(currentRenderNotes, finalLoop, barSec, lastChordSegments);
@@ -976,7 +962,6 @@ async function playLoop(relpath, rowId){
   });
   timers.push(setTimeout(()=>{ if(playing && playing.id===rowId){ playLoop(relpath, rowId); } }, Math.max(0, finalLoop*1000)));
 
-  // Playhead timer
   const svg = document.getElementById('rollSvg');
   const updatePH = () => {
     const phEl = document.getElementById('playhead');
@@ -1010,7 +995,6 @@ function stopAll(){
   document.querySelectorAll('.row .name').forEach(el=>el.classList.remove('playing'));
   currentRectMap.forEach(rect => rect.classList.remove('active'));
 }
-document.getElementById('stopAll').addEventListener('click', stopAll);
 const _saFloat=document.getElementById('stopAllFloat'); if(_saFloat){ _saFloat.addEventListener('click', stopAll); }
 window.addEventListener('beforeunload', stopAll);
 
@@ -1066,15 +1050,19 @@ function renderList(files){
 }
 
 // Filter
-document.getElementById('filterBox').addEventListener('input', e => {
-  const q = e.target.value.toLowerCase();
-  const filtered = fileData.filter(f => {
-    const fields = [f.filename, f.root, f.mode, f.time_signature, String(f.tempo_bpm), f.classification];
-    return fields.filter(Boolean).some(s => String(s).toLowerCase().includes(q));
+const filterBox = document.getElementById('filterBox');
+if(filterBox){
+  filterBox.addEventListener('input', e => {
+    const q = e.target.value.toLowerCase();
+    const filtered = fileData.filter(f => {
+      const fields = [f.filename, f.root, f.mode, f.time_signature, String(f.tempo_bpm), f.classification];
+      return fields.filter(Boolean).some(s => String(s).toLowerCase().includes(q));
+    });
+    renderList(filtered);
   });
-  renderList(filtered);
-});
+}
 
+// Export helpers
 function currentChordTag(){
   const add = document.getElementById('addChordTag').checked;
   if(!add || !lastChordSegments || !lastChordSegments.length) return null;
@@ -1167,9 +1155,9 @@ loadFiles();
 
 def main():
     global ROOT
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--root', required=True, help='Root folder containing .mid files')
-    parser.add_argument('--port', type=int, default=8765, help='Port to run on (default 8765)')
+    parser = argparse.ArgumentParser(description="WebMIDI Clip Manager")
+    parser.add_argument('--root', required=True, help='Root folder containing .mid files (scanned recursively)')
+    parser.add_argument('--port', type=int, default=8765, help='HTTP port (default 8765)')
     args = parser.parse_args()
     ROOT = Path(args.root).expanduser().resolve()
     if not ROOT.exists():
