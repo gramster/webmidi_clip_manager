@@ -128,6 +128,3 @@ Tags are short and order‑stable; chord tag is only added when chord detection 
   - Preserved: two‑column Analysis, piano roll improvements, chord labels, velocity scaling (single control), Normalize‑to‑C & power‑of‑two defaults.
 
 ---
-
-## License
-Personal use. If you plan to redistribute or integrate this into a commercial product, please ask first.
