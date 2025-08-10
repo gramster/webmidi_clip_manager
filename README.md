@@ -1,31 +1,16 @@
 # WebMIDI Clip Manager
 
-A tiny local web app to **audition MIDI loops in your browser**, analyze basic theory info, and **collect a subset** for your MPC or other workflow.
+A local web app to **audition, analyze, trim, and export MIDI phrases** for synths and grooveboxes — with special helpers for **Yamaha Montage/MODX arps**.
 
-- Preview via **WebMIDI** (hardware synth) **or Built‑in Synth** (WebAudio).
-- Loop playback with **tempo**, **channel**, **normalize‑to‑C**, **velocity scaling**, and **max bars**.
-- One‑click **copy selected** to a `selected/` subfolder, with optional **normalization** and **bar‑length truncation**.
-- Inline **piano roll** and **analysis** panel.
+- Preview via **WebMIDI** (hardware) **or Built-in Synth** (WebAudio).
+- Loop playback with **tempo**, **channel**, **normalize-to-C**, **velocity scaling**, **max bars**, and **power-of-two** loop rounding.
+- **Clip analysis**: key/mode (from name or analysis), **unique pitch count**, **max polyphony**, and classification (**Rhythmic**, **Mono**, **Poly**).
+- **Export** selected files to `selected/`, with optional **normalization**, **bar-length truncation**, and **velocity scaling (export)**.
+- **ZIP export** for the current selection.
+- **Yamaha helpers**: 16-note warning, **force 480 PPQN** on export, and **Pack 4 tracks** builder for “Put Track to Arpeggio.”
+- Inline **piano roll** (SVG, vector) with **live playhead** and **active-note highlighting**, plus an **analysis** panel.
   
 ![Screenshot](screenshot.png)
-
----
-
-## Features
-
-- **WebMIDI + Built‑in Synth**
-  - Choose any available MIDI output *or* use the built‑in WebAudio synth for quick auditioning.
-- **Tempo control** (60/90/120/150 BPM) — preview playback time is correctly scaled (60 is slower than 120).
-- **MIDI channel** selector in a compact **2×8 grid**.
-- **Normalize to C (preview)** — transposes notes during preview so the detected/declared root becomes **C** (mode preserved).
-  - To bake normalization into files, check **“Apply normalization when copying.”**
-- **Velocity scaling (preview)** — enable the toggle and set **Target loudest** (1–127). The **loudest** note maps to that value; others are **scaled proportionally**.
-- **Max bars**
-  - **Preview** truncates playback to the chosen number of bars (computed at the **current preview tempo**).
-  - **Copy** truncates exported files to the same number of bars (computed from the file’s time signature).
-- **Round loop to power‑of‑two bars** (preview) — pads loop length to 1/2/4/8… bars to avoid early loop points when previewing.
-- **Piano roll** — shows note lanes, bar grid, velocity‑tinted notes, and the loop end (red line).
-- **Filter & selection** — search by name/key/mode; check multiple files and copy them in one shot.
 
 ---
 
@@ -36,91 +21,90 @@ A tiny local web app to **audition MIDI loops in your browser**, analyze basic t
   ```bash
   pip install flask mido
   ```
-- Browser: **Chrome** or **Edge** (WebMIDI support). Firefox requires flags and is not recommended here.
+- Browser: **Chrome** or **Edge** (WebMIDI support).
 
-> The server never touches your MIDI ports; WebMIDI is entirely in your browser.
+> The server only serves files. MIDI output is handled entirely in your browser (WebMIDI) or through the built-in WebAudio synth.
 
 ---
 
 ## Quick Start
 
-1. Put `webmidi_clip_manager.py` somewhere handy.
+1. Place `webmidi_clip_manager.py` somewhere convenient.
 2. Run it pointing at your MIDI folder:
    ```bash
    python webmidi_clip_manager.py --root "/path/to/your/midis" --port 8765
    ```
 3. Open **http://localhost:8765** in Chrome/Edge.
-4. If you’ll use hardware MIDI, **allow MIDI access** when prompted and choose your device from **Output**;
-   or pick **Built‑in Synth**.
+4. Choose **Built-in Synth** or a WebMIDI device when prompted.
 
 ---
 
-## UI Guide
+## UI Overview (2×2 layout)
 
-### Controls (Top‑Left)
+- **Top-Left — Controls**
+  - **Output**: WebMIDI destination or **Built-in Synth**.
+  - **MIDI Channel**: 1–16 in compact 2×8 grid.
+  - **Tempo (preview)**: 60 / 90 / 120 / 150 BPM.  
+    > Preview timing uses `scale = original_bpm / selected_bpm` — 60 is slower than 120.
+  - **Normalize to C (preview)**: Toggle + **Undo**. Preserves mode.
+    - To bake normalization into exports, use **Apply normalization** in the export box.
+  - **Velocity scaling (preview)**: Toggle + **Target loudest** (default 100).
+  - **Max bars (preview)**: Truncates loop length at the current tempo.
+  - **Round loop to power-of-two bars** (preview): Extends loop to 1/2/4/8… bars.
+  - **Yamaha mode (export)**: **Force 480 PPQN** (recommended for Montage/MODX).
+  - **Export velocity scaling** (new): scale note-on velocities so **loudest = target** in the exported file.
+  - **Playback**: **Stop All** immediately stops playback, kills synth voices, and sends All Notes Off.
+  - **Filter**: Search name/key/mode/classification.
+  - **Export selected**:
+    - **Apply normalization** — transpose so the root becomes **C** (same mode).
+    - **Max bars** — truncate exports to this length.
+    - **Copy →** write processed files into `selected/`.
+    - **Download ZIP** — generate a single ZIP of the processed selection.
+    - **Pack 4 tracks (Yamaha)** — make a single SMF Type‑1 at **480 PPQN**, ready for **Put Track to Arpeggio**.
 
-- **Output** — pick **Built‑in Synth** or any WebMIDI output.
-- **MIDI Channel** — 1–16 in a compact 2×8 grid.
-- **Tempo** — 60 / 90 / 120 / 150 BPM (preview only; scales time correctly).
-- **Normalize to C (preview)** — toggle + **Undo**.
-  - Baked‑in normalization is available via **Copy → Apply normalization**.
-- **Velocity scaling (preview)** — toggle + **Target loudest** (default 100).
-  - Loudest preview velocity becomes the target; others scale proportionally.
-  - *Note: velocity scaling affects preview only (not the exported files).*  
-- **Max bars**
-  - **Preview**: truncates loop length to this many bars at the **current preview tempo**.
-  - **Copy**: exported file is cut to this many bars (based on its time signature).
-- **Round loop to power‑of‑two bars (preview)** — extends preview loop length to the next 1/2/4/8… bar boundary.
-- **Stop** — sends All Notes Off (or kills synth voices).
-- **Filter** — quick text filter across name/key/mode/tempo.
-- **Copy selected → `selected/`**
-  - **Apply normalization** — writes a transposed copy (root→C, same mode).
-  - **Max bars** — truncates exports to this length.
+- **Top-Right — Analysis**
+  - Key/Mode (from filename when present; else by analysis)
+  - Tempo, Time Signature, PPQ, Estimated Bars, Note Count
+  - **Unique pitches** with a **>16 warning** (Yamaha arp limit)
+  - **Max polyphony**, classification (**Rhythmic**, **Monophonic**, **Polyphonic**)
+  - Channels used (highlights Ch 10 to suggest **Convert Type: Fixed**)
+  - Semitone shift to **Transpose to C (same mode)**
 
-### Analysis (Top‑Right)
+- **Bottom-Left — Files**
+  - Recursive listing of `.mid` files under `--root`
+  - Click a name or **Play** to audition; **Stop** or **Stop All** to end
+  - Pills show time signature, tempo, note count, unique pitches, classification, key/mode
+  - A red warning pill appears when **>16 unique notes**
 
-Shows the file’s **key/mode** (from **filename** when present; else via simple major/minor analysis), **tempo**, **time signature**, **PPQ**, **estimated bars**, **note count**, and the semitone shift needed to **transpose to C** for the same mode.
-
-> Filename parsing recognizes forms like `Cmin`, `Dmaj`, `Gb Lydian`, `F# Dorian`, etc.  
-> Analysis fallback is a basic major/minor key guess (Krumhansl‑Schmuckler style profile).
-
-### Files (Bottom‑Left)
-
-- Scrollable list of `.mid` files (recursively found under `--root`).
-- Click a name or **Play** to audition; use **Stop** to end.
-- Tick the checkbox to include in the export batch.
-
-### Piano Roll (Bottom‑Right)
-
-- Bar grid, velocity‑tinted note blocks, and a red loop‑end marker.
-- Reflects **preview** transforms (tempo scaling, normalization, velocity scaling, max‑bars limit, p2 rounding).
+- **Bottom-Right — Piano Roll (SVG)**
+  - Vector-based grid and notes for crisp scaling
+  - **Live playhead** and **active-note highlighting**
+  - Velocity-tinted notes, start markers, and a red loop-end line
+  - Reflects current preview transforms (tempo, normalization, velocity scaling, max-bars limit, p2 rounding)
 
 ---
 
 ## Export Details
 
-- Copies go into `selected/` under your `--root` folder.
-- **Apply normalization**: transposes note numbers only; timing and velocities are preserved.
-- **Max bars**: trims events beyond the bar boundary and closes any sustained notes at the boundary.
+- Exports are written to `selected/` under your `--root`.
+- **Copy**:
+  - Optional **Apply normalization** (transpose note numbers only)
+  - Optional **Max bars** (trims events past the boundary and closes sustained notes)
+  - Optional **Force 480 PPQN**
+  - Optional **Velocity scaling (export)** — scales all note-on velocities so the **loudest** equals your **Target**; others are scaled proportionally and clamped 1–127.
+  - Filenames include helpful tags: `C <Mode>`, `max4bar`, classification, `OrgRoot=<X>`, and `VelMax=<N>` when enabled.
+- **Download ZIP**:
+  - Directly downloads a ZIP containing the processed versions of your current selection.
+- **Pack 4 tracks (Yamaha)**:
+  - Builds a single **Type-1** file at **480 PPQN** with up to 4 tracks
+  - Per-track: optional normalization to C and truncation to max bars
+  - Output filename includes source stems + tags
 
-> Export does **not** apply velocity scaling — it’s for preview only (by design).  
-> Want it baked into exports? Open an issue/ask and we’ll add an option.
-
----
-
-## Tips & Troubleshooting
-
-- **No sound?**
-  - Using WebMIDI: confirm your device is selected and the browser has WebMIDI permission.
-  - Using Built‑in Synth: it’s a simple sawtooth; turn down your speakers 🙃
-- **Tempo feels off** — preview rescaling uses `scale = original_bpm / selected_bpm` so 60 plays **slower** than 120.
-- **Stuck notes** — hit **Stop**; it sends All Notes Off / kills synth voices.
-- **Firefox** — WebMIDI is disabled by default; use Chrome/Edge for best results.
-- **Very long files** — use **Max bars** + **Round loop to power‑of‑two** in preview to keep loops tidy, and set **Max bars** for export.
+> Preview velocity scaling is **separate** from export scaling. Enable each where needed.
 
 ---
 
-## Command‑Line Reference
+## Command-Line Reference
 
 ```
 usage: webmidi_clip_manager.py --root PATH [--port PORT]
@@ -128,21 +112,4 @@ usage: webmidi_clip_manager.py --root PATH [--port PORT]
 --root   Root folder containing .mid files (scanned recursively)
 --port   HTTP port (default 8765)
 ```
-
----
-
-## Security & Privacy
-
-- Runs **entirely locally**; files are served from your machine and are not uploaded.
-- WebMIDI permissions are handled by your browser.
-
----
-
-## Roadmap / Ideas
-
-- Optional **ZIP export** for the selected set.
-- Option to **apply velocity scaling** to the exported files.
-- Per‑file preview **transpose slider**.
-- Built‑in **GM‑style** synth voices.
-
 
