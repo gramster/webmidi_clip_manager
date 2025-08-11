@@ -365,9 +365,10 @@ html,body{height:100%} body{margin:0;font-family:ui-sans-serif,system-ui,-apple-
 .status{font-size:12px;color:#a9b1ba}
 input[type="text"],input[type="number"]{background:#0d131a;color:#e6edf3;border:1px solid #202833;border-radius:8px;padding:6px 8px}
 #fileList{overflow:auto;display:flex;flex-direction:column}
-.row{display:grid;grid-template-columns:24px 1fr auto auto;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #151b21}
+.fileHeader{display:grid;grid-template-columns:24px 60px 52px 52px 64px 52px 68px 80px 36px 56px 56px 1fr;gap:8px;align-items:center;padding:6px 10px;border-bottom:1px solid #151b21;background:#0f1419;position:relative;z-index:1}
+.row{display:grid;grid-template-columns:24px 60px 52px 52px 64px 52px 68px 80px 36px 56px 56px 1fr;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid #151b21}
 .row:hover{background:#0f1419}
-.name{cursor:pointer;font-weight:600;font-size:13px}
+.fname{cursor:pointer;font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pill{font-size:10px;padding:2px 6px;border-radius:12px;background:#0e1620;border:1px solid #1c2228;color:#cfd6dd;margin-left:4px;white-space:nowrap}
 .pill.warn{border-color:#e55353;color:#ff9a9a}
 .controls button{margin-left:6px;background:#1f2937;color:#e6edf3;border:1px solid #2b3542;border-radius:6px;padding:4px 8px;cursor:pointer}
@@ -450,6 +451,9 @@ input[type="text"],input[type="number"]{background:#0d131a;color:#e6edf3;border:
 
   <section class="panel" style="grid-area:list;">
     <header class="hdrflex"><h2>Files</h2><input type="text" id="filterBox" placeholder="Filter…"></header>
+    <div id="fileHeader" class="fileHeader">
+      <div></div><div>Tracks</div><div>Tsig</div><div>BPM</div><div>Notes</div><div>Uniq</div><div>Type</div><div>Scale</div><div></div><div></div><div></div><div>File</div>
+    </div>
     <div class="body" id="fileList"></div>
   </section>
 
@@ -768,15 +772,15 @@ async function playLoop(relpath, rowId){
 
   playing={id:rowId, timers, loopLen:finalLoop, startMs:performance.now()};
   playheadTimer=phIv;
-  document.querySelectorAll('.row .name').forEach(el=>el.classList.remove('playing'));
-  const nameEl=document.querySelector(`#row-${cssEscape(rowId)} .name`); if(nameEl) nameEl.classList.add('playing');
+  document.querySelectorAll('.row .fname').forEach(el=>el.classList.remove('playing'));
+  const nameEl=document.querySelector(`#row-${cssEscape(rowId)} .fname`); if(nameEl) nameEl.classList.add('playing');
 }
 
 function stopAll(){
   if(playing){ playing.timers.forEach(clearTimeout); playing=null; }
   if(playheadTimer){ clearInterval(playheadTimer); playheadTimer=null; }
   if(useSynth){ synthAllNotesOff(); } else if(currentOut){ for(let ch=0; ch<16; ch++){ currentOut.send([0xB0|ch,123,0]); currentOut.send([0xB0|ch,120,0]); } }
-  document.querySelectorAll('.row .name').forEach(el=>el.classList.remove('playing'));
+  document.querySelectorAll('.row .fname').forEach(el=>el.classList.remove('playing'));
   currentRectMap.forEach(rect=>rect.classList.remove('active'));
 }
 document.getElementById('stopAllFloat').addEventListener('click', stopAll);
@@ -788,31 +792,32 @@ function renderList(files){
   const box=document.getElementById('fileList'); box.innerHTML='';
   files.forEach(f=>{
     const rowId=f.relpath; const div=document.createElement('div'); div.className='row'; div.id='row-'+cssEscape(rowId);
-    const keytxt=f.root && f.mode ? (f.root+' '+labelMode(f.mode)) : 'key: n/a';
-    const classMap={rhythmic_single_note:'Rhythmic', monophonic_melodic:'Mono', polyphonic_chordal:'Poly'}; const classTxt=classMap[f.classification]||'';
-    const warn16=f.over16_unique?'<span class="pill warn">>16 unique</span>':''; const drumHint=f.uses_ch10?'<span class="pill">Suggest: Fixed</span>':''; const trk=(f.track_count&&f.track_count>1)?`<span class="pill">${f.track_count} tracks</span>`:'';
+    const typeMap={rhythmic_single_note:'Rhy', monophonic_melodic:'Mono', polyphonic_chordal:'Poly'};
+    const typeTxt=typeMap[f.classification]||'';
+    const keytxt=(f.root && f.mode)? (f.root+' '+labelMode(f.mode)) : '—';
+    const bpmTxt=(f.tempo_bpm? String(Math.round(f.tempo_bpm)) : '—');
+    const notesTxt=String(f.note_count||0);
+    const uniqTxt=String(f.unique_pitches||0);
+    const tsigTxt=(f.time_signature || '—');
+    const trkTxt=(f.track_count && f.track_count>1)? String(f.track_count) : (f.track_count? String(f.track_count): '1');
     div.innerHTML=`
       <div><input type="checkbox" class="pick" data-rel="${encodeURIComponent(f.relpath)}" title="Select for copy/zip"></div>
-      <div class="name" title="Click to play">${f.filename}
-        ${trk} ${warn16} ${drumHint}
-        ${f.time_signature?`<span class="pill">${f.time_signature}</span>`:''}
-        ${f.tempo_bpm?`<span class="pill">${Math.round(f.tempo_bpm)}</span>`:''}
-        <span class="pill">${(f.note_count||0)}</span>
-        <span class="pill">${(f.unique_pitches||0)} uniq</span>
-        ${classTxt?`<span class="pill">${classTxt}</span>`:''}
-        ${keytxt?`<span class="pill">${keytxt}</span>`:''}
-      </div>
-      <div class="meta"></div>
-      <div class="controls">
-        <button class="btnstar star" data-rel="${encodeURIComponent(f.relpath)}" title="Toggle for multitrack">★</button>
-        <button class="play" data-rel="${encodeURIComponent(f.relpath)}">Play</button>
-        <button class="stop" data-rel="${encodeURIComponent(f.relpath)}">Stop</button>
-      </div>`;
+      <div>${trkTxt}</div>
+      <div>${tsigTxt}</div>
+      <div>${bpmTxt}</div>
+      <div>${notesTxt}</div>
+      <div>${uniqTxt}</div>
+      <div>${typeTxt}</div>
+      <div>${keytxt}</div>
+      <div class="controls"><button class="btnstar star" data-rel="${encodeURIComponent(f.relpath)}" title="Toggle for multitrack">★</button></div>
+      <div class="controls"><button class="play" data-rel="${encodeURIComponent(f.relpath)}">Play</button></div>
+      <div class="controls"><button class="stop" data-rel="${encodeURIComponent(f.relpath)}">Stop</button></div>
+      <div class="fname" title="Click to play">${f.filename}</div>`;
     box.appendChild(div);
   });
   box.querySelectorAll('button.play').forEach(b=> b.addEventListener('click', e=>{ const rel=decodeURIComponent(e.currentTarget.dataset.rel); const id=rel; showDetails(rel); playLoop(rel,id); }));
   box.querySelectorAll('button.stop').forEach(b=> b.addEventListener('click', stopAll));
-  box.querySelectorAll('.row .name').forEach(n=> n.addEventListener('click', e=>{ const row=e.currentTarget.closest('.row'); const rel=decodeURIComponent(row.querySelector('.play').dataset.rel); const id=rel; showDetails(rel); playLoop(rel,id); }));
+  box.querySelectorAll('.row .fname').forEach(n=> n.addEventListener('click', e=>{ const row=e.currentTarget.closest('.row'); const rel=decodeURIComponent(row.querySelector('.play').dataset.rel); const id=rel; showDetails(rel); playLoop(rel,id); }));
   box.querySelectorAll('button.star').forEach(b=> b.addEventListener('click', e=>{
     const rel=decodeURIComponent(e.currentTarget.dataset.rel);
     const btn=e.currentTarget; const key=rel;
@@ -821,13 +826,6 @@ function renderList(files){
     const mc=document.getElementById('multiCount'); if(mc) mc.textContent = `(${multiSel.size})`;
   }));
 }
-
-// Filter
-document.getElementById('filterBox').addEventListener('input', e=>{
-  const q=e.target.value.toLowerCase();
-  const filtered=fileData.filter(f=>{ const fields=[f.filename,f.root,f.mode,f.time_signature,String(f.tempo_bpm),f.classification,f.track_count]; return fields.filter(Boolean).some(s=>String(s).toLowerCase().includes(q)); });
-  renderList(filtered);
-});
 
 // Export helpers
 function getNormalizationMode(){ const r=document.querySelector('input[name="normMode"]:checked'); return r? r.value : 'off'; }
